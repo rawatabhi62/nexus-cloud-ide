@@ -197,8 +197,8 @@ ROOM_PAGE = """
         .sidebar { width: 290px; background: #111827; border-right: 1px solid #1f2937; display: flex; flex-direction: column; padding: 15px; }
         .main-content { flex: 1; display: flex; flex-direction: column; }
         .header { height: 50px; background: #111827; border-bottom: 1px solid #1f2937; display: flex; align-items: center; justify-content: space-between; padding: 0 20px; }
-        textarea { flex: 3; background: #030712; color: #38bdf8; border: none; font-family: 'Fira Code', monospace; font-size: 14px; padding: 15px; resize: none; outline: none; line-height: 1.5; }
-        .terminal-pane { flex: 1.2; background: #020617; border-top: 1px solid #1f2937; display: flex; flex-direction: column; }
+         textarea { flex: 2; height: 50vh; background: #030712; color: #38bdf8; border: none; font-family: 'Fira Code', monospace; font-size: 14px; padding: 15px; resize: none; outline: none; line-height: 1.5; }
+        .terminal-pane { flex: 1; height: 35vh; background: #020617; border-top: 1px solid #1f2937; display: flex; flex-direction: column; }
         .terminal-header { background: #0f172a; padding: 8px 15px; font-size: 13px; font-weight: bold; color: #38bdf8; display: flex; justify-content: space-between; }
         pre { margin: 0; padding: 12px; font-family: 'Fira Code', monospace; font-size: 13px; color: #4ade80; overflow-y: auto; flex: 1; white-space: pre-wrap; }
         button { background: linear-gradient(135deg, #00ffcc, #38bdf8); color: #030712; border: none; padding: 8px 16px; font-weight: bold; border-radius: 4px; cursor: pointer; transition: 0.2s; }
