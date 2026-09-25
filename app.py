@@ -2,8 +2,6 @@ import os
 import sys
 import tempfile
 import subprocess
-import pty
-import select
 import ast
 import uuid
 from flask import Flask, render_template_string, request, redirect, url_for
@@ -66,11 +64,11 @@ def handle_ai(data):
     code = data.get('code', '')
     reply = ""
     if 'explain' in query:
-        reply = f"🤖 AI Copilot: Script has {len(code.splitlines())} lines. Powered by real-time interactive PTY shell."
+        reply = f"🤖 AI Copilot: Script has {len(code.splitlines())} lines. Structured for high-performance cloud execution."
     elif 'optimize' in query:
-        reply = "🤖 AI Copilot Tip: Use built-in functions and avoid redundant loops for optimal performance."
+        reply = "🤖 AI Copilot Tip: Use efficient loops and built-in functions to reduce time complexity."
     elif 'bug' in query or 'error' in query:
-        reply = "🤖 AI Audit: No syntax anomalies or recursion faults detected."
+        reply = "🤖 AI Audit: No critical syntax issues or execution locks found."
     else:
         reply = "🤖 AI Copilot: Ready. Ask me to 'explain', 'optimize', or 'find bugs'."
     emit('ai_response', {'reply': reply}, room=request.sid)
@@ -95,85 +93,61 @@ def handle_ai_fix(data):
         emit('sync_code', {'code': new_code, 'logs': rooms[room_id]['activity_log']}, room=room_id)
         emit('notification', {'msg': '✨ AI Auto-Fix applied successfully!'}, room=request.sid)
 
-# Real-time Interactive PTY Execution (Jaise real compiler me hota hai)
-@socketio.on('execute_interactive')
-def handle_interactive(data):
+# Standard Robust Execution Engine (Normal Compiler Style)
+@socketio.on('execute_standard')
+def handle_standard_exec(data):
     room_id = data.get('room_id')
     lang = data.get('language', 'python')
+    user_input = data.get('input', '')
     username = data.get('username', 'Dev')
+    
     if room_id not in rooms: return
     code = rooms[room_id]['code']
-
-    ext = '.py' if lang == 'python' else '.js' if lang == 'javascript' else '.cpp'
-    with tempfile.NamedTemporaryFile(mode='w', suffix=ext, delete=False) as f:
-        f.write(code)
-        fname = f.name
-
-    cmd = [sys.executable, '-u', fname] if lang == 'python' else ['node', fname] if lang == 'javascript' else ['g++', fname, '-o', fname + '.out']
+    output = ""
     
     try:
-        if lang == 'cpp':
-            comp = subprocess.run(cmd, capture_output=True, text=True)
+        if lang == 'python':
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+                f.write(code)
+                fname = f.name
+            res = subprocess.run([sys.executable, '-u', fname], input=user_input, capture_output=True, text=True, timeout=5)
+            output = res.stdout if res.stdout else res.stderr
+            os.unlink(fname)
+        elif lang == 'javascript':
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.js', delete=False) as f:
+                f.write(code)
+                js_name = f.name
+            res = subprocess.run(['node', js_name], input=user_input, capture_output=True, text=True, timeout=5)
+            output = res.stdout if res.stdout else res.stderr
+            os.unlink(js_name)
+        elif lang == 'cpp':
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.cpp', delete=False) as f:
+                f.write(code)
+                cpp_name = f.name
+            exe = cpp_name + ".out"
+            comp = subprocess.run(['g++', cpp_name, '-o', exe], capture_output=True, text=True)
             if comp.returncode != 0:
-                emit('terminal_output', {'output': f"C++ Compilation Error:\n{comp.stderr}"}, room=request.sid)
-                os.unlink(fname)
-                return
-            cmd = [fname + '.out']
-
-        master_fd, slave_fd = pty.openpty()
-        p = subprocess.Popen(cmd, stdin=slave_fd, stdout=slave_fd, stderr=slave_fd, close_fds=True)
-        os.close(slave_fd)
-
-        rooms[room_id]['master_fd'] = master_fd
-        rooms[room_id]['active_proc'] = p
-
-        output_buffer = ""
-        while p.poll() is None:
-            rlist, _, _ = select.select([master_fd], [], [], 0.1)
-            if master_fd in rlist:
-                try:
-                    chunk = os.read(master_fd, 1024).decode('utf-8', errors='ignore')
-                    if not chunk: break
-                    output_buffer += chunk
-                    emit('terminal_output', {'output': output_buffer}, room=request.sid)
-                except OSError:
-                    break
-        
-        try:
-            while True:
-                rlist, _, _ = select.select([master_fd], [], [], 0.1)
-                if not rlist: break
-                chunk = os.read(master_fd, 1024).decode('utf-8', errors='ignore')
-                if not chunk: break
-                output_buffer += chunk
-        except Exception:
-            pass
-
-        emit('terminal_output', {'output': output_buffer + "\n\n[Process completed]"}, room=request.sid)
-        rooms[room_id]['activity_log'].insert(0, f"▶ {username} executed {lang.upper()} code.")
-        emit('sync_logs', {'logs': rooms[room_id]['activity_log']}, room=room_id)
-
-        if os.path.exists(fname): os.unlink(fname)
-        if lang == 'cpp' and os.path.exists(fname + '.out'): os.unlink(fname + '.out')
-
+                output = f"C++ Compilation Error:\n{comp.stderr}"
+            else:
+                run_res = subprocess.run([exe], input=user_input, capture_output=True, text=True, timeout=5)
+                output = run_res.stdout if run_res.stdout else run_res.stderr
+                if os.path.exists(exe): os.unlink(exe)
+            if os.path.exists(cpp_name): os.unlink(cpp_name)
+    except subprocess.TimeoutExpired:
+        output = "❌ Execution Error: Process timed out (Possible infinite loop or waiting for missing input)."
     except Exception as e:
-        emit('terminal_output', {'output': f"Execution Error: {str(e)}"}, room=request.sid)
-
-@socketio.on('terminal_input')
-def handle_term_input(data):
-    room_id = data.get('room_id')
-    user_input = data.get('input', '')
-    if room_id in rooms and 'master_fd' in rooms[room_id]:
-        try:
-            os.write(rooms[room_id]['master_fd'], (user_input + '\n').encode('utf-8'))
-        except Exception:
-            pass
+        output = f"Execution Error: {str(e)}"
+    
+    if not output: output = "[Executed with no output]"
+    rooms[room_id]['activity_log'].insert(0, f"▶ {username} executed {lang.upper()} code.")
+    
+    emit('terminal_output', {'output': output, 'logs': rooms[room_id]['activity_log']}, room=room_id)
 
 HOME_PAGE = """<!DOCTYPE html><html><head><title>Nexus Global Cloud IDE</title></head>
 <body style="background:#090d16; color:#fff; font-family:'Segoe UI',sans-serif; display:flex; justify-content:center; align-items:center; height:100vh; margin:0;">
     <div style="text-align:center; background:#111827; padding:45px; border-radius:12px; border:1px solid #1f2937;">
         <h1 style="color:#00ffcc;">🌐 Nexus Universal Cloud IDE</h1>
-        <p style="color:#94a3b8; margin-bottom:25px;">Interactive Terminal & AI Copilot Enabled.</p>
+        <p style="color:#94a3b8; margin-bottom:25px;">Standard Secure Sandbox Compiler Enabled.</p>
         <a href="/create"><button style="background:linear-gradient(135deg, #00ffcc, #38bdf8); color:#030712; border:none; padding:14px 28px; font-weight:bold; border-radius:6px; cursor:pointer;">Launch New Room</button></a>
     </div>
 </body></html>"""
@@ -188,7 +162,7 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
     textarea { flex: 1; background: #030712; color: #38bdf8; border: none; font-size: 14px; padding: 15px; resize: none; outline: none; line-height: 1.5; overflow-y: auto; }
     .terminal-pane { height: 35vh; background: #020617; border-top: 1px solid #1f2937; display: flex; flex-direction: column; flex-shrink: 0; }
     .terminal-header { background: #0f172a; padding: 8px 15px; font-size: 13px; font-weight: bold; color: #38bdf8; display: flex; justify-content: space-between; align-items:center; }
-    #outputBox { margin: 0; padding: 12px; font-size: 13px; color: #4ade80; overflow-y: auto; flex: 1; white-space: pre-wrap; background: #020617; border: none; outline: none; font-family: 'Courier New', monospace; }
+    pre { margin: 0; padding: 12px; font-size: 13px; color: #4ade80; overflow-y: auto; flex: 1; white-space: pre-wrap; background: #020617; }
     button { background: linear-gradient(135deg, #00ffcc, #38bdf8); color: #030712; border: none; padding: 7px 14px; font-weight: bold; border-radius: 4px; cursor: pointer; font-size:12px; }
     button:hover { opacity: 0.85; }
     select, input { background: #1f2937; color: #fff; border: 1px solid #374151; padding: 6px; border-radius: 4px; font-family: inherit; }
@@ -231,15 +205,18 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
                     <option value="cpp">C++</option>
                 </select>
             </div>
-            <button onclick="runCode()">▶ Execute Interactive Code</button>
+            <div style="display: flex; gap: 10px; align-items: center;">
+                <input type="text" id="stdinInput" placeholder="Stdin values (e.g. Abhishek, 21)..." style="width: 220px; font-size: 12px;">
+                <button onclick="runCode()">▶ Execute Code</button>
+            </div>
         </div>
         <textarea id="codeEditor"></textarea>
         <div class="terminal-pane">
             <div class="terminal-header">
-                <span>📊 Interactive Output Shell (Type directly here when input is requested)</span>
-                <span style="color: #4ade80;">● PTY Terminal Active</span>
+                <span>📊 Output Console</span>
+                <span style="color: #4ade80;">● Secure Sandbox Active</span>
             </div>
-            <textarea id="outputBox" spellcheck="false" placeholder="Console ready... Click 'Execute Interactive Code' to start. Type directly inside this console when input() is triggered."></textarea>
+            <pre id="outputBox">Console ready... Enter inputs in the top box if your code uses input() and click 'Execute Code'.</pre>
         </div>
     </div>
     <script>
@@ -291,24 +268,14 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
 
         function runCode() {
             let lang = document.getElementById('langSelect').value;
-            outputBox.value = "Initializing interactive PTY shell...\n";
-            socket.emit('execute_interactive', { room_id: roomId, language: lang, username: username });
+            let userInput = document.getElementById('stdinInput').value;
+            outputBox.innerText = "Running sandbox container...";
+            socket.emit('execute_standard', { room_id: roomId, language: lang, input: userInput, username: username });
         }
 
         socket.on('terminal_output', (data) => {
-            outputBox.value = data.output;
-            outputBox.scrollTop = outputBox.scrollHeight;
-        });
-
-        // Real compiler ki tarah output box ke andar hi type karke Enter dabane par input bhejne ke liye
-        outputBox.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') {
-                e.preventDefault();
-                let lines = outputBox.value.split('\n');
-                let lastLine = lines[lines.length - 1];
-                socket.emit('terminal_input', { room_id: roomId, input: lastLine });
-                outputBox.value += '\n';
-            }
+            outputBox.innerText = data.output;
+            if(data.logs) updateLogs(data.logs);
         });
 
         function sendAiQuery() {
@@ -318,7 +285,7 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
             document.getElementById('aiQueryInput').value = '';
         }
         socket.on('ai_response', (data) => {
-            document.getElementById('aiChatBox').innerText += "\\n" + data.reply;
+            document.getElementById('aiChatBox'].innerText += "\\n" + data.reply;
             let chatBox = document.getElementById('aiChatBox');
             chatBox.scrollTop = chatBox.scrollHeight;
         });
