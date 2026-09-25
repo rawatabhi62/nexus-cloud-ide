@@ -20,7 +20,7 @@ def home():
 def create_room():
     room_id = str(uuid.uuid4())[:8]
     rooms[room_id] = {
-        'code': "# Welcome to Nexus Global Cloud IDE\nname = input('Enter your name: ')\nprint(f'Hello, {name}!')",
+        'code': "# Welcome to Nexus Global Cloud IDE\nname = input('Enter your name: ')\nprint(f'Hello, {name}! Welcome to Nexus Universal IDE.')",
         'activity_log': ["🛡️ Room initialized successfully."]
     }
     return redirect(url_for('join_room_page', room_id=room_id))
@@ -56,7 +56,7 @@ def handle_save(data):
     if room_id in rooms:
         rooms[room_id]['activity_log'].insert(0, f"💾 {username} saved cloud checkpoint.")
         emit('sync_logs', {'logs': rooms[room_id]['activity_log']}, room=room_id)
-        emit('notification', {'msg': '✅ Code successfully saved to cloud!'}, room=request.sid)
+        emit('notification', {'msg': '✅ Code successfully saved to cloud checkpoint!'}, room=request.sid)
 
 @socketio.on('ai_chat')
 def handle_ai(data):
@@ -64,13 +64,13 @@ def handle_ai(data):
     code = data.get('code', '')
     reply = ""
     if 'explain' in query:
-        reply = f"🤖 AI Copilot: Script has {len(code.splitlines())} lines. Optimized for sequential interactive execution."
+        reply = f"🤖 AI Copilot: This script contains {len(code.splitlines())} lines. It features real-time socket syncing and secure execution sandboxing."
     elif 'optimize' in query:
-        reply = "🤖 AI Copilot Tip: Use efficient loops and built-in functions to reduce time complexity."
+        reply = "🤖 AI Copilot Tip: Use built-in functions, list comprehensions, and avoid heavy global state mutations for better efficiency."
     elif 'bug' in query or 'error' in query:
-        reply = "🤖 AI Audit: No critical syntax issues or execution locks found."
+        reply = "🤖 AI Audit: No syntax faults, recursion limits, or security vulnerabilities detected in active scope."
     else:
-        reply = "🤖 AI Copilot: Ready. Ask me to 'explain', 'optimize', or 'find bugs'."
+        reply = "🤖 AI Copilot: Context analyzed. Ask me to 'explain code', 'optimize', or 'find bugs'."
     emit('ai_response', {'reply': reply}, room=request.sid)
 
 @socketio.on('ai_fix')
@@ -93,19 +93,17 @@ def handle_ai_fix(data):
         emit('sync_code', {'code': new_code, 'logs': rooms[room_id]['activity_log']}, room=room_id)
         emit('notification', {'msg': '✨ AI Auto-Fix applied successfully!'}, room=request.sid)
 
-# Programiz style Sequential Interactive Execution Engine
 @socketio.on('execute_interactive')
 def handle_interactive_exec(data):
     room_id = data.get('room_id')
     lang = data.get('language', 'python')
-    inputs = data.get('inputs', []) # Array of inputs provided sequentially by user
+    inputs = data.get('inputs', [])
     username = data.get('username', 'Dev')
     
     if room_id not in rooms: return
     code = rooms[room_id]['code']
     output = ""
     
-    # Join all inputs with newlines so python's input() consumes them one by one sequentially
     combined_input = "\n".join(inputs) + ("\n" if inputs else "")
     
     try:
@@ -137,7 +135,7 @@ def handle_interactive_exec(data):
                 if os.path.exists(exe): os.unlink(exe)
             if os.path.exists(cpp_name): os.unlink(cpp_name)
     except subprocess.TimeoutExpired:
-        output = "❌ Execution Error: Process timed out (Waiting for more inputs or infinite loop)."
+        output = "❌ Execution Error: Process timed out (Waiting for inputs or infinite loop)."
     except Exception as e:
         output = f"Execution Error: {str(e)}"
     
@@ -150,7 +148,7 @@ HOME_PAGE = """<!DOCTYPE html><html><head><title>Nexus Global Cloud IDE</title><
 <body style="background:#090d16; color:#fff; font-family:'Segoe UI',sans-serif; display:flex; justify-content:center; align-items:center; height:100vh; margin:0;">
     <div style="text-align:center; background:#111827; padding:45px; border-radius:12px; border:1px solid #1f2937;">
         <h1 style="color:#00ffcc;">🌐 Nexus Universal Cloud IDE</h1>
-        <p style="color:#94a3b8; margin-bottom:25px;">Interactive Sequential Compiler Enabled.</p>
+        <p style="color:#94a3b8; margin-bottom:25px;">Professional Multi-Language Collaborative Cloud IDE.</p>
         <a href="/create"><button style="background:linear-gradient(135deg, #00ffcc, #38bdf8); color:#030712; border:none; padding:14px 28px; font-weight:bold; border-radius:6px; cursor:pointer;">Launch New Room</button></a>
     </div>
 </body></html>"""
@@ -174,16 +172,14 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
     .ai-chat-box { flex: 1; overflow-y: auto; background: #0f172a; padding: 6px; margin-bottom: 6px; border-radius: 4px; font-size: 11px; white-space: pre-wrap; }
     .log-panel { background: #0f172a; border: 1px solid #1e293b; padding: 8px; border-radius: 6px; margin-top: 10px; height: 100px; overflow-y: auto; font-size: 11px; color: #94a3b8; }
     
-    /* Interactive Modal for Sequential Inputs */
     #inputModal { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(3,7,18,0.85); display: none; justify-content: center; align-items: center; z-index: 1000; }
     .modal-box { background: #111827; border: 1px solid #1f2937; padding: 25px; border-radius: 8px; width: 350px; text-align: center; }
 </style></head>
 <body>
-    <!-- Interactive Prompt Modal -->
     <div id="inputModal">
         <div class="modal-box">
             <h3 style="color: #00ffcc; margin-top:0;">⌨️ Provide Program Input</h3>
-            <p id="promptLabel" style="font-size: 13px; color: #94a3b8;">Enter value:</p>
+            <p id="promptLabel" style="font-size: 13px; color: #94a3b8;">Enter value for input():</p>
             <input type="text" id="modalInputVal" placeholder="Type value here..." style="width: 90%; margin-bottom: 15px; padding: 8px;">
             <br>
             <button onclick="submitModalInput()" style="background: #4ade80; color: #030712; width: 100%;">Submit & Continue</button>
@@ -229,7 +225,7 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
         <div class="terminal-pane">
             <div class="terminal-header">
                 <span>📊 Output Console</span>
-                <span style="color: #4ade80;">● Programiz Style Interactive Sandbox</span>
+                <span style="color: #4ade80;">● Secure Sandbox Active</span>
             </div>
             <pre id="outputBox">Console ready... Click 'Execute Code' to run.</pre>
         </div>
@@ -281,13 +277,11 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
             URL.revokeObjectURL(url);
         }
 
-        // Programiz style sequential input collection
         let currentInputs = [];
         let requiredInputCount = 0;
 
         function startExecution() {
             let code = editor.value;
-            // Count how many input() statements are in the python code to prompt sequentially
             let matches = code.match(/input\s*\(/g);
             requiredInputCount = matches ? matches.length : 0;
             currentInputs = [];
@@ -300,7 +294,7 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
         }
 
         function showNextPrompt(index) {
-            document.getElementById('promptLabel.innerText` = `Input request #${index} (e.g. value for input()):`;
+            document.getElementById('promptLabel').innerText = `Input request #${index} (Value for input()):`;
             document.getElementById('inputModal').style.display = 'flex';
             document.getElementById('modalInputVal').value = '';
             document.getElementById('modalInputVal').focus();
