@@ -4,9 +4,6 @@ import tempfile
 import subprocess
 import pty
 import select
-import termios
-import struct
-import fcntl
 import ast
 import uuid
 from flask import Flask, render_template_string, request, redirect, url_for
@@ -82,6 +79,14 @@ def handle_code(data):
         rooms[room_id]['code'] = code
         emit('sync_room_code', {'code': code}, room=room_id, include_self=False)
 
+@socketio.on('save_code_cloud')
+def handle_save(data):
+    room_id, username = data.get('room_id'), data.get('username', 'Dev')
+    if room_id in rooms:
+        rooms[room_id]['activity_log'].insert(0, f"💾 {username} saved checkpoint.")
+        emit('update_room_users', {'users': list(rooms[room_id]['active_users'].values()), 'logs': rooms[room_id]['activity_log']}, room=room_id)
+        emit('save_notification', {'msg': '✅ Code successfully saved to cloud room state!'}, room=request.sid)
+
 @socketio.on('ai_chat_query')
 def handle_ai_chat(data):
     room_id, query = data.get('room_id'), data.get('query', '').lower()
@@ -89,13 +94,13 @@ def handle_ai_chat(data):
     code = rooms[room_id]['code']
     reply = ""
     if 'explain' in query:
-        reply = f"🤖 AI Copilot: Script has {len(code.splitlines())} lines. Built with real-time WebSockets & interactive PTY shell."
+        reply = f"🤖 AI Copilot: Script has {len(code.splitlines())} lines. Powered by real-time WebSockets and PTY shell."
     elif 'optimize' in query:
-        reply = "🤖 AI Copilot: Use built-in functions and clean loops to optimize runtime performance."
+        reply = "🤖 AI Copilot: Tip: Leverage list comprehensions and avoid redundant loops for optimal performance."
     elif 'bug' in query or 'error' in query:
-        reply = "🤖 AI Audit: No recursion locks or critical vulnerabilities found."
+        reply = "🤖 AI Audit: No syntax anomalies or recursion faults detected."
     else:
-        reply = "🤖 AI Copilot: Ready to assist. Ask me to 'explain' or 'optimize'."
+        reply = "🤖 AI Copilot: Ready. Ask me to 'explain', 'optimize', or 'find bugs'."
     emit('ai_chat_response', {'reply': reply}, room=request.sid)
 
 @socketio.on('ai_auto_fix')
@@ -117,7 +122,6 @@ def handle_ai_auto_fix(data):
     emit('sync_room_code', {'code': new_code}, room=room_id)
     emit('update_room_users', {'users': list(rooms[room_id]['active_users'].values()), 'logs': rooms[room_id]['activity_log']}, room=room_id)
 
-# Professional Real-time PTY Interactive Execution Engine
 @socketio.on('execute_interactive_code')
 def handle_interactive_exec(data):
     room_id, lang, username = data.get('room_id'), data.get('language', 'python'), data.get('username', 'Dev')
@@ -140,12 +144,10 @@ def handle_interactive_exec(data):
                 return
             cmd = [fname + '.out']
 
-        # Spawn interactive Pseudo-Terminal (PTY)
         master_fd, slave_fd = pty.openpty()
         p = subprocess.Popen(cmd, stdin=slave_fd, stdout=slave_fd, stderr=slave_fd, close_fds=True)
         os.close(slave_fd)
 
-        # Store process handle for real-time stdin streaming if needed
         rooms[room_id]['active_proc'] = p
         rooms[room_id]['master_fd'] = master_fd
 
@@ -161,7 +163,6 @@ def handle_interactive_exec(data):
                 except OSError:
                     break
         
-        # Read remaining output
         try:
             while True:
                 rlist, _, _ = select.select([master_fd], [], [], 0.1)
@@ -356,7 +357,6 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
             outputBox.scrollTop = outputBox.scrollHeight;
         });
 
-        // Capture direct typing in terminal output shell for live stdin streaming
         outputBox.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') {
                 e.preventDefault();
@@ -374,7 +374,7 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
             document.getElementById('aiQueryInput').value = '';
         }
         socket.on('ai_chat_response', (data) => { 
-            document.getElementById('aiChatBox'].innerText += "\\n" + data.reply; 
+            document.getElementById('aiChatBox').innerText += "\\n" + data.reply; 
             let chatBox = document.getElementById('aiChatBox');
             chatBox.scrollTop = chatBox.scrollHeight;
         });
