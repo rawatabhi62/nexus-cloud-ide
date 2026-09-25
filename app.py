@@ -66,7 +66,7 @@ def handle_ai(data):
     code = data.get('code', '')
     reply = ""
     if 'explain' in query:
-        reply = f"🤖 AI Copilot: Script has {len(code.splitlines())} lines. Powered by real-time interactive PTY shell."
+        reply = f"🤖 AI Copilot: Script has {len(code.splitlines())} lines. Powered by real-time interactive PTY terminal."
     elif 'optimize' in query:
         reply = "🤖 AI Copilot Tip: Use efficient loops and built-in functions to reduce time complexity."
     elif 'bug' in query or 'error' in query:
@@ -95,9 +95,9 @@ def handle_ai_fix(data):
         emit('sync_code', {'code': new_code, 'logs': rooms[room_id]['activity_log']}, room=room_id)
         emit('notification', {'msg': '✨ AI Auto-Fix applied successfully!'}, room=request.sid)
 
-# Real-time Sequential PTY Execution Engine
-@socketio.on('execute_live')
-def handle_live_exec(data):
+# Programiz Style Live PTY Execution Engine
+@socketio.on('execute_programiz_live')
+def handle_programiz_exec(data):
     room_id = data.get('room_id')
     lang = data.get('language', 'python')
     username = data.get('username', 'Dev')
@@ -149,7 +149,7 @@ def handle_live_exec(data):
         except Exception:
             pass
 
-        emit('terminal_output', {'output': output_buffer + "\n\n[Process completed]"}, room=request.sid)
+        emit('terminal_output', {'output': output_buffer + "\n\n[Program finished]"}, room=request.sid)
         rooms[room_id]['activity_log'].insert(0, f"▶ {username} executed {lang.upper()} code.")
         emit('sync_logs', {'logs': rooms[room_id]['activity_log']}, room=room_id)
 
@@ -159,8 +159,8 @@ def handle_live_exec(data):
     except Exception as e:
         emit('terminal_output', {'output': f"Execution Error: {str(e)}"}, room=request.sid)
 
-@socketio.on('send_terminal_input')
-def handle_term_input(data):
+@socketio.on('send_pty_input')
+def handle_pty_input(data):
     room_id = data.get('room_id')
     user_input = data.get('input', '')
     if room_id in rooms and 'master_fd' in rooms[room_id]:
@@ -173,7 +173,7 @@ HOME_PAGE = """<!DOCTYPE html><html><head><title>Nexus Global Cloud IDE</title><
 <body style="background:#090d16; color:#fff; font-family:'Segoe UI',sans-serif; display:flex; justify-content:center; align-items:center; height:100vh; margin:0;">
     <div style="text-align:center; background:#111827; padding:45px; border-radius:12px; border:1px solid #1f2937;">
         <h1 style="color:#00ffcc;">🌐 Nexus Universal Cloud IDE</h1>
-        <p style="color:#94a3b8; margin-bottom:25px;">Live Interactive Terminal Enabled.</p>
+        <p style="color:#94a3b8; margin-bottom:25px;">Programiz Style True Interactive Terminal Enabled.</p>
         <a href="/create"><button style="background:linear-gradient(135deg, #00ffcc, #38bdf8); color:#030712; border:none; padding:14px 28px; font-weight:bold; border-radius:6px; cursor:pointer;">Launch New Room</button></a>
     </div>
 </body></html>"""
@@ -188,8 +188,10 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
     textarea { flex: 1; background: #030712; color: #38bdf8; border: none; font-size: 14px; padding: 15px; resize: none; outline: none; line-height: 1.5; overflow-y: auto; }
     .terminal-pane { height: 35vh; background: #020617; border-top: 1px solid #1f2937; display: flex; flex-direction: column; flex-shrink: 0; }
     .terminal-header { background: #0f172a; padding: 8px 15px; font-size: 13px; font-weight: bold; color: #38bdf8; display: flex; justify-content: space-between; align-items:center; }
+    
+    /* Programiz style inline interactive console */
     #outputBox { margin: 0; padding: 12px; font-size: 13px; color: #4ade80; overflow-y: auto; flex: 1; white-space: pre-wrap; background: #020617; border: none; outline: none; font-family: 'Courier New', monospace; }
-    .terminal-input-bar { background: #090d16; padding: 8px 12px; display: flex; gap: 10px; border-top: 1px solid #1f2937; align-items: center; }
+    
     button { background: linear-gradient(135deg, #00ffcc, #38bdf8); color: #030712; border: none; padding: 7px 14px; font-weight: bold; border-radius: 4px; cursor: pointer; font-size:12px; }
     button:hover { opacity: 0.85; }
     select, input { background: #1f2937; color: #fff; border: 1px solid #374151; padding: 6px; border-radius: 4px; font-family: inherit; }
@@ -232,20 +234,16 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
                     <option value="cpp">C++</option>
                 </select>
             </div>
-            <button onclick="runLiveCode()">▶ Run Live Code</button>
+            <button onclick="runProgramizCode()">▶ Run Code</button>
         </div>
         <textarea id="codeEditor"></textarea>
         <div class="terminal-pane">
             <div class="terminal-header">
-                <span>📊 Live Interactive Terminal</span>
-                <span style="color: #4ade80;">● Sequential PTY Active</span>
+                <span>📊 Output Console (Click inside console and type when input is requested)</span>
+                <span style="color: #4ade80;">● Programiz Style Active</span>
             </div>
-            <pre id="outputBox">Console ready... Click 'Run Live Code' to start execution.</pre>
-            <div class="terminal-input-bar">
-                <span style="font-size: 12px; color: #38bdf8;">Input:</span>
-                <input type="text" id="terminalInputField" placeholder="Type input here when prompted and hit Enter..." style="flex: 1; font-size: 12px; padding: 5px;" onkeydown="handleTerminalKey(event)">
-                <button onclick="sendTerminalInput()" style="padding: 5px 12px;">Send</button>
-            </div>
+            <!-- True Programiz style interactive output console -->
+            <textarea id="outputBox" spellcheck="false" placeholder="Console ready... Click 'Run Code' to start execution. Type directly inside this console when input() prompts appear."></textarea>
         </div>
     </div>
     <script>
@@ -295,39 +293,37 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
             URL.revokeObjectURL(url);
         }
 
-        function runLiveCode() {
+        function runProgramizCode() {
             let lang = document.getElementById('langSelect').value;
-            outputBox.innerText = "Initializing live PTY container...\n";
-            socket.emit('execute_live', { room_id: roomId, language: lang, username: username });
+            outputBox.value = "Initializing program execution...\n";
+            socket.emit('execute_programiz_live', { room_id: roomId, language: lang, username: username });
         }
 
         socket.on('terminal_output', (data) => {
-            outputBox.innerText = data.output;
+            outputBox.value = data.output;
             outputBox.scrollTop = outputBox.scrollHeight;
             if(data.logs) updateLogs(data.logs);
         });
 
-        function sendTerminalInput() {
-            let inputField = document.getElementById('terminalInputField');
-            let val = inputField.value;
-            socket.emit('send_terminal_input', { room_id: roomId, input: val });
-            inputField.value = '';
-        }
-
-        function handleTerminalKey(e) {
+        // Programiz style: Jaise hi user output console ke andar type karke Enter dabayega, input backend stream me chala jayega
+        outputBox.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') {
-                sendTerminalInput();
+                e.preventDefault();
+                let lines = outputBox.value.split('\n');
+                let lastLine = lines[lines.length - 1];
+                socket.emit('send_pty_input', { room_id: roomId, input: lastLine });
+                outputBox.value += '\n';
             }
-        }
+        });
 
         function sendAiQuery() {
             let q = document.getElementById('aiQueryInput').value; if(!q) return;
-            document.getElementById('aiChatBox').innerText += "\\nYou: " + q;
+            document.getElementById('aiChatBox'].innerText += "\\nYou: " + q;
             socket.emit('ai_chat', { query: q, code: editor.value });
             document.getElementById('aiQueryInput').value = '';
         }
         socket.on('ai_response', (data) => {
-            document.getElementById('aiChatBox').innerText += "\\n" + data.reply;
+            document.getElementById('aiChatBox'].innerText += "\\n" + data.reply;
             let chatBox = document.getElementById('aiChatBox');
             chatBox.scrollTop = chatBox.scrollHeight;
         });
