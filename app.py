@@ -3,7 +3,6 @@ import sys
 import tempfile
 import subprocess
 import threading
-import queue
 import uuid
 from flask import Flask, render_template_string, request, redirect, url_for
 from flask_socketio import SocketIO, emit, join_room
@@ -65,7 +64,7 @@ def handle_ai(data):
     code = data.get('code', '')
     reply = ""
     if 'explain' in query:
-        reply = f"🤖 AI Copilot: Script has {len(code.splitlines())} lines. Optimized for interactive execution."
+        reply = f"🤖 AI Copilot: Script has {len(code.splitlines())} lines."
     elif 'optimize' in query:
         reply = "🤖 AI Copilot Tip: Use efficient loops and built-in functions."
     elif 'bug' in query or 'error' in query:
@@ -94,7 +93,6 @@ def handle_ai_fix(data):
         emit('sync_code', {'code': new_code, 'logs': rooms[room_id]['activity_log']}, room=room_id)
         emit('notification', {'msg': '✨ AI Auto-Fix applied successfully!'}, room=request.sid)
 
-# Real-time Interactive Subprocess Execution with Stdin Pipe (Programiz Style)
 @socketio.on('start_interactive_run')
 def handle_start_run(data):
     room_id = data.get('room_id')
@@ -221,15 +219,15 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
                     <option value="cpp">C++</option>
                 </select>
             </div>
-            <button onclick="runInteractiveCode()">▶ Run Code</button>
+            <button onclick="runCode()">▶ Run Code</button>
         </div>
         <textarea id="codeEditor"></textarea>
         <div class="terminal-pane">
             <div class="terminal-header">
-                <span>📊 Output Console (Type directly inside console when input() prompts appear)</span>
-                <span style="color: #4ade80;">● Programiz Style Active</span>
+                <span>📊 Output Console (Type inside console and press Enter when input is requested)</span>
+                <span style="color: #4ade80;">● Interactive Terminal Active</span>
             </div>
-            <textarea id="outputBox" spellcheck="false" placeholder="Console ready... Click 'Run Code' to start execution. Type directly inside this console when input is requested." onkeydown="handleConsoleKey(event)"></textarea>
+            <textarea id="outputBox" spellcheck="false" placeholder="Console ready... Click 'Run Code' to start execution." onkeydown="handleConsoleKey(event)"></textarea>
         </div>
     </div>
     <script>
@@ -279,9 +277,9 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
             URL.revokeObjectURL(url);
         }
 
-        function runInteractiveCode() {
+        function runCode() {
             let lang = document.getElementById('langSelect').value;
-            outputBox.value = "Initializing program execution...\n";
+            outputBox.value = "Initializing execution...\n";
             socket.emit('start_interactive_run', { room_id: roomId, language: lang, username: username });
         }
 
@@ -290,13 +288,10 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
             outputBox.scrollTop = outputBox.scrollHeight;
         });
 
-        let currentInputBuffer = "";
-
         function handleConsoleKey(e) {
             if (e.key === 'Enter') {
                 e.preventDefault();
                 let text = outputBox.value;
-                // Extract last line typed by user after last newline
                 let lines = text.split('\n');
                 let lastLine = lines[lines.length - 1];
                 
