@@ -64,7 +64,7 @@ def handle_ai(data):
     code = data.get('code', '')
     reply = ""
     if 'explain' in query:
-        reply = f"🤖 AI Copilot: Script has {len(code.splitlines())} lines. Structured for high-performance cloud execution."
+        reply = f"🤖 AI Copilot: Script has {len(code.splitlines())} lines. Optimized for sequential interactive execution."
     elif 'optimize' in query:
         reply = "🤖 AI Copilot Tip: Use efficient loops and built-in functions to reduce time complexity."
     elif 'bug' in query or 'error' in query:
@@ -93,31 +93,34 @@ def handle_ai_fix(data):
         emit('sync_code', {'code': new_code, 'logs': rooms[room_id]['activity_log']}, room=room_id)
         emit('notification', {'msg': '✨ AI Auto-Fix applied successfully!'}, room=request.sid)
 
-# Standard Robust Execution Engine (Normal Compiler Style)
-@socketio.on('execute_standard')
-def handle_standard_exec(data):
+# Programiz style Sequential Interactive Execution Engine
+@socketio.on('execute_interactive')
+def handle_interactive_exec(data):
     room_id = data.get('room_id')
     lang = data.get('language', 'python')
-    user_input = data.get('input', '')
+    inputs = data.get('inputs', []) # Array of inputs provided sequentially by user
     username = data.get('username', 'Dev')
     
     if room_id not in rooms: return
     code = rooms[room_id]['code']
     output = ""
     
+    # Join all inputs with newlines so python's input() consumes them one by one sequentially
+    combined_input = "\n".join(inputs) + ("\n" if inputs else "")
+    
     try:
         if lang == 'python':
             with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
                 f.write(code)
                 fname = f.name
-            res = subprocess.run([sys.executable, '-u', fname], input=user_input, capture_output=True, text=True, timeout=5)
+            res = subprocess.run([sys.executable, '-u', fname], input=combined_input, capture_output=True, text=True, timeout=5)
             output = res.stdout if res.stdout else res.stderr
             os.unlink(fname)
         elif lang == 'javascript':
             with tempfile.NamedTemporaryFile(mode='w', suffix='.js', delete=False) as f:
                 f.write(code)
                 js_name = f.name
-            res = subprocess.run(['node', js_name], input=user_input, capture_output=True, text=True, timeout=5)
+            res = subprocess.run(['node', js_name], input=combined_input, capture_output=True, text=True, timeout=5)
             output = res.stdout if res.stdout else res.stderr
             os.unlink(js_name)
         elif lang == 'cpp':
@@ -129,12 +132,12 @@ def handle_standard_exec(data):
             if comp.returncode != 0:
                 output = f"C++ Compilation Error:\n{comp.stderr}"
             else:
-                run_res = subprocess.run([exe], input=user_input, capture_output=True, text=True, timeout=5)
+                run_res = subprocess.run([exe], input=combined_input, capture_output=True, text=True, timeout=5)
                 output = run_res.stdout if run_res.stdout else run_res.stderr
                 if os.path.exists(exe): os.unlink(exe)
             if os.path.exists(cpp_name): os.unlink(cpp_name)
     except subprocess.TimeoutExpired:
-        output = "❌ Execution Error: Process timed out (Possible infinite loop or waiting for missing input)."
+        output = "❌ Execution Error: Process timed out (Waiting for more inputs or infinite loop)."
     except Exception as e:
         output = f"Execution Error: {str(e)}"
     
@@ -147,7 +150,7 @@ HOME_PAGE = """<!DOCTYPE html><html><head><title>Nexus Global Cloud IDE</title><
 <body style="background:#090d16; color:#fff; font-family:'Segoe UI',sans-serif; display:flex; justify-content:center; align-items:center; height:100vh; margin:0;">
     <div style="text-align:center; background:#111827; padding:45px; border-radius:12px; border:1px solid #1f2937;">
         <h1 style="color:#00ffcc;">🌐 Nexus Universal Cloud IDE</h1>
-        <p style="color:#94a3b8; margin-bottom:25px;">Standard Secure Sandbox Compiler Enabled.</p>
+        <p style="color:#94a3b8; margin-bottom:25px;">Interactive Sequential Compiler Enabled.</p>
         <a href="/create"><button style="background:linear-gradient(135deg, #00ffcc, #38bdf8); color:#030712; border:none; padding:14px 28px; font-weight:bold; border-radius:6px; cursor:pointer;">Launch New Room</button></a>
     </div>
 </body></html>"""
@@ -170,8 +173,23 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
     .ai-panel { background: #1e1b4b; border: 1px solid #4338ca; padding: 10px; border-radius: 6px; margin-top: 10px; font-size: 12px; color: #c7d2fe; display: flex; flex-direction: column; height: 170px; }
     .ai-chat-box { flex: 1; overflow-y: auto; background: #0f172a; padding: 6px; margin-bottom: 6px; border-radius: 4px; font-size: 11px; white-space: pre-wrap; }
     .log-panel { background: #0f172a; border: 1px solid #1e293b; padding: 8px; border-radius: 6px; margin-top: 10px; height: 100px; overflow-y: auto; font-size: 11px; color: #94a3b8; }
+    
+    /* Interactive Modal for Sequential Inputs */
+    #inputModal { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(3,7,18,0.85); display: none; justify-content: center; align-items: center; z-index: 1000; }
+    .modal-box { background: #111827; border: 1px solid #1f2937; padding: 25px; border-radius: 8px; width: 350px; text-align: center; }
 </style></head>
 <body>
+    <!-- Interactive Prompt Modal -->
+    <div id="inputModal">
+        <div class="modal-box">
+            <h3 style="color: #00ffcc; margin-top:0;">⌨️ Provide Program Input</h3>
+            <p id="promptLabel" style="font-size: 13px; color: #94a3b8;">Enter value:</p>
+            <input type="text" id="modalInputVal" placeholder="Type value here..." style="width: 90%; margin-bottom: 15px; padding: 8px;">
+            <br>
+            <button onclick="submitModalInput()" style="background: #4ade80; color: #030712; width: 100%;">Submit & Continue</button>
+        </div>
+    </div>
+
     <div class="sidebar">
         <h3 style="color: #00ffcc; margin-top:0;">🌐 Room: {{ room_id }}</h3>
         <p style="font-size: 12px; color: #94a3b8; margin: 5px 0;">Developer Handle:</p>
@@ -205,18 +223,15 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
                     <option value="cpp">C++</option>
                 </select>
             </div>
-            <div style="display: flex; gap: 10px; align-items: center;">
-                <input type="text" id="stdinInput" placeholder="Stdin values (e.g. Abhishek, 21)..." style="width: 220px; font-size: 12px;">
-                <button onclick="runCode()">▶ Execute Code</button>
-            </div>
+            <button onclick="startExecution()">▶ Execute Code</button>
         </div>
         <textarea id="codeEditor"></textarea>
         <div class="terminal-pane">
             <div class="terminal-header">
                 <span>📊 Output Console</span>
-                <span style="color: #4ade80;">● Secure Sandbox Active</span>
+                <span style="color: #4ade80;">● Programiz Style Interactive Sandbox</span>
             </div>
-            <pre id="outputBox">Console ready... Enter inputs in the top box if your code uses input() and click 'Execute Code'.</pre>
+            <pre id="outputBox">Console ready... Click 'Execute Code' to run.</pre>
         </div>
     </div>
     <script>
@@ -266,11 +281,50 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
             URL.revokeObjectURL(url);
         }
 
-        function runCode() {
+        // Programiz style sequential input collection
+        let currentInputs = [];
+        let requiredInputCount = 0;
+
+        function startExecution() {
+            let code = editor.value;
+            // Count how many input() statements are in the python code to prompt sequentially
+            let matches = code.match(/input\s*\(/g);
+            requiredInputCount = matches ? matches.length : 0;
+            currentInputs = [];
+
+            if (requiredInputCount > 0) {
+                showNextPrompt(1);
+            } else {
+                executeFinal([]);
+            }
+        }
+
+        function showNextPrompt(index) {
+            document.getElementById('promptLabel.innerText` = `Input request #${index} (e.g. value for input()):`;
+            document.getElementById('inputModal').style.display = 'flex';
+            document.getElementById('modalInputVal').value = '';
+            document.getElementById('modalInputVal').focus();
+        }
+
+        function submitModalInput() {
+            let val = document.getElementById('modalInputVal').value;
+            currentInputs.push(val);
+            let currentIdx = currentInputs.length;
+
+            if (currentIdx < requiredInputCount) {
+                document.getElementById('promptLabel').innerText = `Input request #${currentIdx + 1}:`;
+                document.getElementById('modalInputVal').value = '';
+                document.getElementById('modalInputVal').focus();
+            } else {
+                document.getElementById('inputModal').style.display = 'none';
+                executeFinal(currentInputs);
+            }
+        }
+
+        function executeFinal(inputsArray) {
             let lang = document.getElementById('langSelect').value;
-            let userInput = document.getElementById('stdinInput').value;
             outputBox.innerText = "Running sandbox container...";
-            socket.emit('execute_standard', { room_id: roomId, language: lang, input: userInput, username: username });
+            socket.emit('execute_interactive', { room_id: roomId, language: lang, inputs: inputsArray, username: username });
         }
 
         socket.on('terminal_output', (data) => {
@@ -285,7 +339,7 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
             document.getElementById('aiQueryInput').value = '';
         }
         socket.on('ai_response', (data) => {
-            document.getElementById('aiChatBox'].innerText += "\\n" + data.reply;
+            document.getElementById('aiChatBox').innerText += "\\n" + data.reply;
             let chatBox = document.getElementById('aiChatBox');
             chatBox.scrollTop = chatBox.scrollHeight;
         });
