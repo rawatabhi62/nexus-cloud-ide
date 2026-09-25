@@ -225,7 +225,7 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
     #overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(3,7,18,0.95); display: flex; flex-direction: column; justify-content: center; align-items: center; z-index: 999; color: #fff; }
     .ai-panel { background: #1e1b4b; border: 1px solid #4338ca; padding: 10px; border-radius: 6px; margin-top: 10px; font-size: 12px; color: #c7d2fe; display: flex; flex-direction: column; height: 170px; }
     .ai-chat-box { flex: 1; overflow-y: auto; background: #0f172a; padding: 6px; margin-bottom: 6px; border-radius: 4px; font-size: 11px; white-space: pre-wrap; }
-    .log-panel { background: #0f172a; border: 1px solid #1e1b4b; padding: 8px; border-radius: 6px; margin-top: 10px; height: 100px; overflow-y: auto; font-size: 11px; color: #94a3b8; }
+    .log-panel { background: #0f172a; border: 1px solid #1e293b; padding: 8px; border-radius: 6px; margin-top: 10px; height: 100px; overflow-y: auto; font-size: 11px; color: #94a3b8; }
 </style></head>
 <body>
     <div id="overlay"><h2 id="overlayText">⚡ Secure Global Handshake...</h2></div>
@@ -267,15 +267,20 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
                     <option value="cpp">C++</option>
                 </select>
             </div>
-            <div style="display: flex; gap: 10px; align-items: center;">
-                <input type="text" id="stdinInput" placeholder="Stdin input values..." style="width: 150px; font-size: 12px;">
-                <button onclick="runCode()">▶ Execute Code</button>
-            </div>
+            <button onclick="runCode()">▶ Execute Code</button>
         </div>
         <textarea id="codeEditor"></textarea>
         <div class="terminal-pane">
-            <div class="terminal-header"><span>📊 Output Console</span><span style="color: #4ade80;">● Secure Sandbox Active</span></div>
+            <div class="terminal-header">
+                <span>📊 Output Console</span>
+                <span style="color: #4ade80;">● Secure Sandbox Active</span>
+            </div>
             <pre id="outputBox">Console ready...</pre>
+            <!-- Interactive Stdin Input Bar inside terminal -->
+            <div style="background: #090d16; padding: 8px 12px; display: flex; gap: 10px; border-top: 1px solid #1f2937; align-items: center;">
+                <span style="font-size: 12px; color: #38bdf8;">Stdin Input:</span>
+                <input type="text" id="stdinInput" placeholder="Type input value here (e.g. Abhishek) and hit Execute..." style="flex: 1; font-size: 12px; padding: 5px;">
+            </div>
         </div>
     </div>
     <script>
@@ -335,10 +340,7 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
 
         function downloadCode() {
             let lang = document.getElementById('langSelect').value;
-            let ext = 'py';
-            if (lang === 'javascript') ext = 'js';
-            if (lang === 'cpp') ext = 'cpp';
-
+            let ext = (lang === 'javascript') ? 'js' : (lang === 'cpp') ? 'cpp' : 'py';
             let blob = new Blob([editor.value], { type: 'text/plain;charset=utf-8' });
             let url = URL.createObjectURL(blob);
             let a = document.createElement('a');
@@ -351,7 +353,7 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
         function runCode() {
             let lang = document.getElementById('langSelect').value;
             let userInput = document.getElementById('stdinInput').value;
-            document.getElementById('outputBox').innerText = "Running sandbox container...";
+            document.getElementById('outputBox').innerText = "Running sandbox container with input...";
             socket.emit('execute_room_code', { room_id: roomId, language: lang, input: userInput, username: username });
         }
 
@@ -364,7 +366,7 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
             let q = document.getElementById('aiQueryInput').value; if(!q) return;
             document.getElementById('aiChatBox').innerText += "\\nYou: " + q;
             socket.emit('ai_chat_query', { room_id: roomId, query: q });
-            document.getElementById('aiQueryInput', '').value = '';
+            document.getElementById('aiQueryInput').value = '';
         }
         socket.on('ai_chat_response', (data) => { 
             document.getElementById('aiChatBox').innerText += "\\n" + data.reply; 
