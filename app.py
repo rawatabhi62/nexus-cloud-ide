@@ -18,7 +18,7 @@ def home():
 def create_room():
     room_id = str(uuid.uuid4())[:8]
     rooms[room_id] = {
-        'code': "# Welcome to Nexus Global Cloud IDE\\nname = input('Enter your name: ')\\nprint(f'Hello, {name}!')",
+        'code': "# Welcome to Nexus Global Cloud IDE\nname = input('Enter your name: ')\nprint(f'Hello, {name}!')",
         'activity_log': ["🛡️ Room initialized successfully."]
     }
     return f"""
@@ -31,7 +31,7 @@ def create_room():
 def join_room_page(room_id):
     if room_id not in rooms:
         rooms[room_id] = {
-            'code': "# Welcome to Nexus Global Cloud IDE\\nname = input('Enter your name: ')\\nprint(f'Hello, {name}!')",
+            'code': "# Welcome to Nexus Global Cloud IDE\nname = input('Enter your name: ')\nprint(f'Hello, {name}!')",
             'activity_log': ["🛡️ Room initialized."]
         }
     return render_template_string(ROOM_PAGE, room_id=room_id)
@@ -62,14 +62,14 @@ def ai_fix():
     if room_id in rooms:
         code = rooms[room_id]['code']
         fixed_lines = []
-        for line in code.split('\\n'):
+        for line in code.split('\n'):
             if line.strip().startswith('print ') and not '(' in line:
                 content = line.strip()[6:]
                 indent = line[:len(line) - len(line.lstrip())]
                 fixed_lines.append(f"{indent}print({content}) # 🤖 AI Fixed")
             else:
                 fixed_lines.append(line)
-        new_code = "\\n".join(fixed_lines)
+        new_code = "\n".join(fixed_lines)
         rooms[room_id]['code'] = new_code
         rooms[room_id]['activity_log'].insert(0, f"✨ {username} ran AI Auto-Fix.")
         return jsonify({'code': new_code, 'logs': rooms[room_id]['activity_log']})
@@ -82,7 +82,7 @@ def ai_chat():
     code = data.get('code', '')
     reply = ""
     if 'explain' in query:
-        reply = f"🤖 AI Copilot: Script has {len(code.splitlines())} lines. Optimized for secure cloud execution."
+        reply = f"🤖 AI Copilot: Script has {len(code.splitlines())} lines. Optimized for cloud execution."
     elif 'optimize' in query:
         reply = "🤖 AI Copilot Tip: Use efficient loops and built-in functions to boost speed."
     elif 'bug' in query or 'error' in query:
@@ -96,7 +96,7 @@ def execute_code():
     data = request.json
     room_id = data.get('room_id')
     lang = data.get('language', 'python')
-    inputs = data.get('inputs', [])
+    user_input = data.get('input', '')
     username = data.get('username', 'Dev')
     
     if room_id not in rooms:
@@ -104,21 +104,20 @@ def execute_code():
     
     code = rooms[room_id]['code']
     output = ""
-    combined_input = "\\n".join(inputs) + ("\\n" if inputs else "")
     
     try:
         if lang == 'python':
             with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
                 f.write(code)
                 fname = f.name
-            res = subprocess.run([sys.executable, '-u', fname], input=combined_input, capture_output=True, text=True, timeout=5)
+            res = subprocess.run([sys.executable, '-u', fname], input=user_input, capture_output=True, text=True, timeout=5)
             output = res.stdout if res.stdout else res.stderr
             os.unlink(fname)
         elif lang == 'javascript':
             with tempfile.NamedTemporaryFile(mode='w', suffix='.js', delete=False) as f:
                 f.write(code)
                 js_name = f.name
-            res = subprocess.run(['node', js_name], input=combined_input, capture_output=True, text=True, timeout=5)
+            res = subprocess.run(['node', js_name], input=user_input, capture_output=True, text=True, timeout=5)
             output = res.stdout if res.stdout else res.stderr
             os.unlink(js_name)
         elif lang == 'cpp':
@@ -128,14 +127,14 @@ def execute_code():
             exe = cpp_name + ".out"
             comp = subprocess.run(['g++', cpp_name, '-o', exe], capture_output=True, text=True)
             if comp.returncode != 0:
-                output = f"C++ Compilation Error:\\n{comp.stderr}"
+                output = f"C++ Compilation Error:\n{comp.stderr}"
             else:
-                run_res = subprocess.run([exe], input=combined_input, capture_output=True, text=True, timeout=5)
+                run_res = subprocess.run([exe], input=user_input, capture_output=True, text=True, timeout=5)
                 output = run_res.stdout if run_res.stdout else run_res.stderr
                 if os.path.exists(exe): os.unlink(exe)
             if os.path.exists(cpp_name): os.unlink(cpp_name)
     except subprocess.TimeoutExpired:
-        output = "❌ Execution Error: Process timed out (Waiting for inputs or infinite loop)."
+        output = "❌ Execution Error: Process timed out (Possible infinite loop)."
     except Exception as e:
         output = f"Execution Error: {str(e)}"
     
@@ -147,7 +146,7 @@ HOME_PAGE = """<!DOCTYPE html><html><head><title>Nexus Global Cloud IDE</title><
 <body style="background:#090d16; color:#fff; font-family:'Segoe UI',sans-serif; display:flex; justify-content:center; align-items:center; height:100vh; margin:0;">
     <div style="text-align:center; background:#111827; padding:45px; border-radius:12px; border:1px solid #1f2937;">
         <h1 style="color:#00ffcc;">🌐 Nexus Universal Cloud IDE</h1>
-        <p style="color:#94a3b8; margin-bottom:25px;">Reliable HTTP-Based Cloud Compiler.</p>
+        <p style="color:#94a3b8; margin-bottom:25px;">Professional Integrated Terminal Environment.</p>
         <a href="/create"><button style="background:linear-gradient(135deg, #00ffcc, #38bdf8); color:#030712; border:none; padding:14px 28px; font-weight:bold; border-radius:6px; cursor:pointer;">Launch New Room</button></a>
     </div>
 </body></html>"""
@@ -159,9 +158,13 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
     .main-content { flex: 1; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
     .header { height: 50px; background: #111827; border-bottom: 1px solid #1f2937; display: flex; align-items: center; justify-content: space-between; padding: 0 20px; flex-shrink: 0; }
     textarea { flex: 1; background: #030712; color: #38bdf8; border: none; font-size: 14px; padding: 15px; resize: none; outline: none; line-height: 1.5; overflow-y: auto; }
-    .terminal-pane { height: 35vh; background: #020617; border-top: 1px solid #1f2937; display: flex; flex-direction: column; flex-shrink: 0; }
+    .terminal-pane { height: 38vh; background: #020617; border-top: 1px solid #1f2937; display: flex; flex-direction: column; flex-shrink: 0; }
     .terminal-header { background: #0f172a; padding: 8px 15px; font-size: 13px; font-weight: bold; color: #38bdf8; display: flex; justify-content: space-between; align-items:center; }
     pre { margin: 0; padding: 12px; font-size: 13px; color: #4ade80; overflow-y: auto; flex: 1; white-space: pre-wrap; background: #020617; }
+    
+    /* Integrated Terminal Input Bar right under output console */
+    .terminal-input-row { background: #090d16; padding: 10px 15px; display: flex; gap: 10px; border-top: 1px solid #1f2937; align-items: center; }
+    
     button { background: linear-gradient(135deg, #00ffcc, #38bdf8); color: #030712; border: none; padding: 7px 14px; font-weight: bold; border-radius: 4px; cursor: pointer; font-size:12px; }
     button:hover { opacity: 0.85; }
     select, input { background: #1f2937; color: #fff; border: 1px solid #374151; padding: 6px; border-radius: 4px; font-family: inherit; }
@@ -169,21 +172,8 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
     .ai-panel { background: #1e1b4b; border: 1px solid #4338ca; padding: 10px; border-radius: 6px; margin-top: 10px; font-size: 12px; color: #c7d2fe; display: flex; flex-direction: column; height: 170px; }
     .ai-chat-box { flex: 1; overflow-y: auto; background: #0f172a; padding: 6px; margin-bottom: 6px; border-radius: 4px; font-size: 11px; white-space: pre-wrap; }
     .log-panel { background: #0f172a; border: 1px solid #1e293b; padding: 8px; border-radius: 6px; margin-top: 10px; height: 100px; overflow-y: auto; font-size: 11px; color: #94a3b8; }
-    
-    #inputModal { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(3,7,18,0.85); display: none; justify-content: center; align-items: center; z-index: 1000; }
-    .modal-box { background: #111827; border: 1px solid #1f2937; padding: 25px; border-radius: 8px; width: 350px; text-align: center; }
 </style></head>
 <body>
-    <div id="inputModal">
-        <div class="modal-box">
-            <h3 style="color: #00ffcc; margin-top:0;">⌨️ Program Input Required</h3>
-            <p id="promptLabel" style="font-size: 13px; color: #94a3b8;">Enter value for input():</p>
-            <input type="text" id="modalInputVal" placeholder="Type value here..." style="width: 90%; margin-bottom: 15px; padding: 8px;">
-            <br>
-            <button onclick="submitModalInput()" style="background: #4ade80; color: #030712; width: 100%;">Submit & Continue</button>
-        </div>
-    </div>
-
     <div class="sidebar">
         <h3 style="color: #00ffcc; margin-top:0;">🌐 Room: {{ room_id }}</h3>
         <p style="font-size: 12px; color: #94a3b8; margin: 5px 0;">Developer Handle:</p>
@@ -217,15 +207,20 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
                     <option value="cpp">C++</option>
                 </select>
             </div>
-            <button onclick="startExecution()">▶ Run Code</button>
+            <button onclick="runCode()">▶ Run Code</button>
         </div>
         <textarea id="codeEditor"></textarea>
         <div class="terminal-pane">
             <div class="terminal-header">
-                <span>📊 Output Console</span>
-                <span style="color: #4ade80;">● HTTP REST Mode Active</span>
+                <span>📊 Output Console & Terminal</span>
+                <span style="color: #4ade80;">● Integrated Mode Active</span>
             </div>
-            <pre id="outputBox">Console ready... Click 'Run Code' to start execution.</pre>
+            <pre id="outputBox">Console ready... Type inputs below if your code uses input() and click 'Run Code'.</pre>
+            <div class="terminal-input-row">
+                <span style="font-size: 12px; color: #38bdf8;">Terminal Input:</span>
+                <input type="text" id="terminalInput" placeholder="Type input here (e.g. Abhishek, 20)..." style="flex: 1; font-size: 12px; padding: 6px;" onkeydown="if(event.key==='Enter') runCode()">
+                <button onclick="runCode()" style="background: #4ade80; color: #030712;">Send & Run</button>
+            </div>
         </div>
     </div>
     <script>
@@ -235,7 +230,6 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
         let username = prompt("Enter your Developer Handle:") || "Dev_" + Math.floor(Math.random()*1000);
         document.getElementById('userBadge').innerText = "🟢 " + username;
 
-        // Fetch initial code via HTTP GET
         fetch('/api/get_code/' + roomId)
             .then(res => res.json())
             .then(data => {
@@ -271,52 +265,15 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
             URL.revokeObjectURL(url);
         }
 
-        let currentInputs = [];
-        let requiredInputCount = 0;
-
-        function startExecution() {
-            let code = editor.value;
-            let matches = code.match(/input\s*\(/g);
-            requiredInputCount = matches ? matches.length : 0;
-            currentInputs = [];
-
-            if (requiredInputCount > 0) {
-                showNextPrompt(1);
-            } else {
-                executeFinal([]);
-            }
-        }
-
-        function showNextPrompt(index) {
-            document.getElementById('promptLabel').innerText = `Input request #${index} (Value for input()):`;
-            document.getElementById('inputModal').style.display = 'flex';
-            document.getElementById('modalInputVal').value = '';
-            document.getElementById('modalInputVal').focus();
-        }
-
-        function submitModalInput() {
-            let val = document.getElementById('modalInputVal').value;
-            currentInputs.push(val);
-            let currentIdx = currentInputs.length;
-
-            if (currentIdx < requiredInputCount) {
-                document.getElementById('promptLabel').innerText = `Input request #${currentIdx + 1}:`;
-                document.getElementById('modalInputVal').value = '';
-                document.getElementById('modalInputVal').focus();
-            } else {
-                document.getElementById('inputModal').style.display = 'none';
-                executeFinal(currentInputs);
-            }
-        }
-
-        function executeFinal(inputsArray) {
+        function runCode() {
             let lang = document.getElementById('langSelect').value;
+            let userInput = document.getElementById('terminalInput').value;
             outputBox.innerText = "Running sandbox container...";
             
             fetch('/api/execute', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ room_id: roomId, language: lang, inputs: inputsArray, username: username })
+                body: JSON.stringify({ room_id: roomId, language: lang, input: userInput, username: username })
             }).then(res => res.json()).then(data => {
                 outputBox.innerText = data.output;
                 if(data.logs) updateLogs(data.logs);
