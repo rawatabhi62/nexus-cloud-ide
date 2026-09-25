@@ -97,23 +97,32 @@ def handle_ai_fix(data):
 def handle_start_run(data):
     room_id = data.get('room_id')
     lang = data.get('language', 'python')
-    username = data.get('username', 'Dev')
-    if room_id not in rooms: return
-    code = rooms[room_id]['code']
+    with rooms_lock:
+        if room_id not in rooms: 
+            return
+        code = rooms[room_id]['code']
 
     ext = '.py' if lang == 'python' else '.js' if lang == 'javascript' else '.cpp'
-    with tempfile.NamedTemporaryFile(mode='w', suffix=ext, delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode='w', suffix=ext, delete=False, encoding='utf-8') as f:
         f.write(code)
         fname = f.name
 
     cmd = [sys.executable, '-u', fname] if lang == 'python' else ['node', fname] if lang == 'javascript' else ['g++', fname, '-o', fname + '.out']
     
+    # Capture the socket ID right here before starting the thread
+    target_sid = request.sid 
+
     try:
         if lang == 'cpp':
             comp = subprocess.run(cmd, capture_output=True, text=True)
             if comp.returncode != 0:
-                emit('terminal_data', {'data': f"C++ Compilation Error:\n{comp.stderr}"}, room=request.sid)
-                os.unlink(fname)
+                emit('terminal_data', {'data': f"C++ Compilation Error:\n{comp.stderr}"}, room=target_sid)
+                try:
+                    os.unlink(fname)
+                    if os.path.exists(fname + '.out'):
+                        os.unlink(fname + '.out')
+                except Exception:
+                    pass
                 return
             cmd = [fname + '.out']
 
@@ -126,21 +135,33 @@ def handle_start_run(data):
             bufsize=1
         )
 
-        rooms[room_id]['process'] = process
+        with rooms_lock:
+            if room_id in rooms:
+                rooms[room_id]['process'] = process
 
         def read_output():
-            while True:
-                char = process.stdout.read(1)
-                if not char:
-                    break
-                socketio.emit('terminal_data', {'data': char}, room=request.sid)
-            process.stdout.close()
-            socketio.emit('terminal_data', {'data': "\n\n[Program finished]\n"}, room=request.sid)
+            try:
+                while True:
+                    char = process.stdout.read(1)
+                    if not char:
+                        break
+                    # Use target_sid instead of request.sid inside thread
+                    socketio.emit('terminal_data', {'data': char}, room=target_sid)
+                process.stdout.close()
+            except Exception:
+                pass
+            socketio.emit('terminal_data', {'data': "\n\n[Program finished]\n"}, room=target_sid)
+            try:
+                os.unlink(fname)
+                if lang == 'cpp' and os.path.exists(fname + '.out'):
+                    os.unlink(fname + '.out')
+            except Exception:
+                pass
 
         threading.Thread(target=read_output, daemon=True).start()
 
     except Exception as e:
-        emit('terminal_data', {'data': f"Execution Error: {str(e)}"}, room=request.sid)
+        emit('terminal_data', {'data': f"Execution Error: {str(e)}"}, room=target_sid)
 
 @socketio.on('send_stdin_data')
 def handle_stdin(data):
@@ -288,18 +309,22 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
             outputBox.scrollTop = outputBox.scrollHeight;
         });
 
-        function handleConsoleKey(e) {
-            if (e.key === 'Enter') {
-                e.preventDefault();
-                let text = outputBox.value;
-                let lines = text.split('\n');
-                let lastLine = lines[lines.length - 1];
-                
-                socket.emit('send_stdin_data', { room_id: roomId, input: lastLine });
-                outputBox.value += '\n';
-                outputBox.scrollTop = outputBox.scrollHeight;
-            }
-        }
+        let currentInputLine = "";
+
+function handleConsoleKey(e) {
+    if (e.key === 'Enter') {
+        e.preventDefault();
+        let text = outputBox.value;
+        // Extract only the newly typed text by getting everything after the last newline
+        let lines = text.split('\n');
+        let userInput = lines[lines.length - 1];
+        
+        // Send only the user input part to backend stdin
+        socket.emit('send_stdin_data', { room_id: roomId, input: userInput });
+        outputBox.value += '\n';
+        outputBox.scrollTop = outputBox.scrollHeight;
+    }
+}
 
         function sendAiQuery() {
             let q = document.getElementById('aiQueryInput').value; if(!q) return;
