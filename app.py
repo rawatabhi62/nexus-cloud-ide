@@ -252,7 +252,10 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
         </div>
     </div>
     <script>
-        const socket = io({ transports: ['polling', 'websocket'] });
+        const socket = io({
+    transports: ['polling'],
+    upgrade: true
+});
 const roomId = "{{ room_id }}";
 const editor = document.getElementById('codeEditor');
 const outputBox = document.getElementById('outputBox');
