@@ -253,13 +253,22 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
     </div>
     <script>
         const socket = io({ transports: ['polling', 'websocket'] });
-        const roomId = "{{ room_id }}";
-        const editor = document.getElementById('codeEditor');
-        const outputBox = document.getElementById('outputBox');
-        let username = prompt("Enter your Developer Handle:") || "Dev_" + Math.floor(Math.random()*1000);
-        document.getElementById('userBadge').innerText = "🟢 " + username;
+const roomId = "{{ room_id }}";
+const editor = document.getElementById('codeEditor');
+const outputBox = document.getElementById('outputBox');
 
-        socket.emit('join_room_socket', { room_id: roomId });
+let username = "Dev_" + Math.floor(Math.random()*1000);
+try {
+    let userInput = prompt("Enter your Developer Handle:");
+    if (userInput && userInput.trim() !== "") {
+        username = userInput.trim();
+    }
+} catch (e) {
+    console.log("Prompt blocked or failed, using default username.");
+}
+document.getElementById('userBadge').innerText = "🟢 " + username;
+
+socket.emit('join_room_socket', { room_id: roomId });
 
         socket.on('sync_code', (data) => {
             if(data.code && editor.value !== data.code) editor.value = data.code;
