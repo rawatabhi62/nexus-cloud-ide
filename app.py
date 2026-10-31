@@ -11,6 +11,7 @@ app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 rooms = {}
+rooms_lock = threading.Lock()
 
 @app.route('/')
 def home():
@@ -19,44 +20,49 @@ def home():
 @app.route('/create')
 def create_room():
     room_id = str(uuid.uuid4())[:8]
-    rooms[room_id] = {
-        'code': "# Welcome to Nexus Global Cloud IDE\nname = input('Enter your name: ')\nprint(f'Hello, {name}!')",
-        'activity_log': ["🛡️ Room initialized successfully."]
-    }
+    with rooms_lock:
+        rooms[room_id] = {
+            'code': "# Welcome to Nexus Global Cloud IDE\nname = input('Enter your name: ')\nprint(f'Hello, {name}!')",
+            'activity_log': ["🛡️ Room initialized successfully."]
+        }
     return redirect(url_for('join_room_page', room_id=room_id))
 
 @app.route('/room/<room_id>')
 def join_room_page(room_id):
-    if room_id not in rooms:
-        rooms[room_id] = {
-            'code': "# Welcome to Nexus Global Cloud IDE\nname = input('Enter your name: ')\nprint(f'Hello, {name}!')",
-            'activity_log': ["🛡️ Room initialized."]
-        }
+    with rooms_lock:
+        if room_id not in rooms:
+            rooms[room_id] = {
+                'code': "# Welcome to Nexus Global Cloud IDE\nname = input('Enter your name: ')\nprint(f'Hello, {name}!')",
+                'activity_log': ["🛡️ Room initialized."]
+            }
     return render_template_string(ROOM_PAGE, room_id=room_id)
 
 @socketio.on('join_room_socket')
 def handle_join(data):
     room_id = data.get('room_id')
     join_room(room_id)
-    if room_id in rooms:
-        emit('sync_code', {'code': rooms[room_id]['code'], 'logs': rooms[room_id]['activity_log']}, room=request.sid)
+    with rooms_lock:
+        if room_id in rooms:
+            emit('sync_code', {'code': rooms[room_id]['code'], 'logs': rooms[room_id]['activity_log']}, room=request.sid)
 
 @socketio.on('update_code')
 def handle_code(data):
     room_id = data.get('room_id')
     code = data.get('code')
-    if room_id in rooms:
-        rooms[room_id]['code'] = code
-        emit('sync_code', {'code': code}, room=room_id, include_self=False)
+    with rooms_lock:
+        if room_id in rooms:
+            rooms[room_id]['code'] = code
+            emit('sync_code', {'code': code}, room=room_id, include_self=False)
 
 @socketio.on('save_cloud')
 def handle_save(data):
     room_id = data.get('room_id')
     username = data.get('username', 'Dev')
-    if room_id in rooms:
-        rooms[room_id]['activity_log'].insert(0, f"💾 {username} saved cloud checkpoint.")
-        emit('sync_logs', {'logs': rooms[room_id]['activity_log']}, room=room_id)
-        emit('notification', {'msg': '✅ Code successfully saved to cloud!'}, room=request.sid)
+    with rooms_lock:
+        if room_id in rooms:
+            rooms[room_id]['activity_log'].insert(0, f"💾 {username} saved cloud checkpoint.")
+            emit('sync_logs', {'logs': rooms[room_id]['activity_log']}, room=room_id)
+            emit('notification', {'msg': '✅ Code successfully saved to cloud!'}, room=request.sid)
 
 @socketio.on('ai_chat')
 def handle_ai(data):
@@ -77,21 +83,22 @@ def handle_ai(data):
 def handle_ai_fix(data):
     room_id = data.get('room_id')
     username = data.get('username', 'AI')
-    if room_id in rooms:
-        code = rooms[room_id]['code']
-        fixed_lines = []
-        for line in code.split('\n'):
-            if line.strip().startswith('print ') and not '(' in line:
-                content = line.strip()[6:]
-                indent = line[:len(line) - len(line.lstrip())]
-                fixed_lines.append(f"{indent}print({content}) # 🤖 AI Fixed")
-            else:
-                fixed_lines.append(line)
-        new_code = "\n".join(fixed_lines)
-        rooms[room_id]['code'] = new_code
-        rooms[room_id]['activity_log'].insert(0, f"✨ {username} ran AI Auto-Fix.")
-        emit('sync_code', {'code': new_code, 'logs': rooms[room_id]['activity_log']}, room=room_id)
-        emit('notification', {'msg': '✨ AI Auto-Fix applied successfully!'}, room=request.sid)
+    with rooms_lock:
+        if room_id in rooms:
+            code = rooms[room_id]['code']
+            fixed_lines = []
+            for line in code.split('\n'):
+                if line.strip().startswith('print ') and not '(' in line:
+                    content = line.strip()[6:]
+                    indent = line[:len(line) - len(line.lstrip())]
+                    fixed_lines.append(f"{indent}print({content}) # 🤖 AI Fixed")
+                else:
+                    fixed_lines.append(line)
+            new_code = "\n".join(fixed_lines)
+            rooms[room_id]['code'] = new_code
+            rooms[room_id]['activity_log'].insert(0, f"✨ {username} ran AI Auto-Fix.")
+            emit('sync_code', {'code': new_code, 'logs': rooms[room_id]['activity_log']}, room=room_id)
+            emit('notification', {'msg': '✨ AI Auto-Fix applied successfully!'}, room=request.sid)
 
 @socketio.on('start_interactive_run')
 def handle_start_run(data):
@@ -109,7 +116,6 @@ def handle_start_run(data):
 
     cmd = [sys.executable, '-u', fname] if lang == 'python' else ['node', fname] if lang == 'javascript' else ['g++', fname, '-o', fname + '.out']
     
-    # Capture the socket ID right here before starting the thread
     target_sid = request.sid 
 
     try:
@@ -145,7 +151,6 @@ def handle_start_run(data):
                     char = process.stdout.read(1)
                     if not char:
                         break
-                    # Use target_sid instead of request.sid inside thread
                     socketio.emit('terminal_data', {'data': char}, room=target_sid)
                 process.stdout.close()
             except Exception:
@@ -167,14 +172,15 @@ def handle_start_run(data):
 def handle_stdin(data):
     room_id = data.get('room_id')
     user_input = data.get('input', '')
-    if room_id in rooms and 'process' in rooms[room_id]:
-        proc = rooms[room_id]['process']
-        if proc.poll() is None:
-            try:
-                proc.stdin.write(user_input + '\n')
-                proc.stdin.flush()
-            except Exception:
-                pass
+    with rooms_lock:
+        if room_id in rooms and 'process' in rooms[room_id]:
+            proc = rooms[room_id]['process']
+            if proc.poll() is None:
+                try:
+                    proc.stdin.write(user_input + '\n')
+                    proc.stdin.flush()
+                except Exception:
+                    pass
 
 HOME_PAGE = """<!DOCTYPE html><html><head><title>Nexus Global Cloud IDE</title></head>
 <body style="background:#090d16; color:#fff; font-family:'Segoe UI',sans-serif; display:flex; justify-content:center; align-items:center; height:100vh; margin:0;">
@@ -189,22 +195,22 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
 <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
 <style>
     body { margin: 0; background: #0b0f19; color: #00ffcc; font-family: 'Courier New', monospace; display: flex; height: 100vh; overflow: hidden; }
-    .sidebar { width: 320px; background: #111827; border-right: 1px solid #1f2937; display: flex; flex-direction: column; padding: 15px; overflow-y: auto; }
+    .sidebar { width: 320px; background: #111827; border-right: 1px solid #1f2937; display: flex; flex-direction: column; padding: 15px; overflow-y: auto; box-sizing: border-box; }
     .main-content { flex: 1; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
-    .header { height: 50px; background: #111827; border-bottom: 1px solid #1f2937; display: flex; align-items: center; justify-content: space-between; padding: 0 20px; flex-shrink: 0; }
-    textarea { flex: 1; background: #030712; color: #38bdf8; border: none; font-size: 14px; padding: 15px; resize: none; outline: none; line-height: 1.5; overflow-y: auto; }
+    .header { height: 50px; background: #111827; border-bottom: 1px solid #1f2937; display: flex; align-items: center; justify-content: space-between; padding: 0 20px; flex-shrink: 0; box-sizing: border-box; }
+    textarea { flex: 1; background: #030712; color: #38bdf8; border: none; font-size: 14px; padding: 15px; resize: none; outline: none; line-height: 1.5; overflow-y: auto; box-sizing: border-box; }
     .terminal-pane { height: 38vh; background: #020617; border-top: 1px solid #1f2937; display: flex; flex-direction: column; flex-shrink: 0; }
     .terminal-header { background: #0f172a; padding: 8px 15px; font-size: 13px; font-weight: bold; color: #38bdf8; display: flex; justify-content: space-between; align-items:center; }
     
-    #outputBox { margin: 0; padding: 12px; font-size: 13px; color: #4ade80; overflow-y: auto; flex: 1; white-space: pre-wrap; background: #020617; border: none; outline: none; font-family: 'Courier New', monospace; }
+    #outputBox { margin: 0; padding: 12px; font-size: 13px; color: #4ade80; overflow-y: auto; flex: 1; white-space: pre-wrap; background: #020617; border: none; outline: none; font-family: 'Courier New', monospace; box-sizing: border-box; }
     
     button { background: linear-gradient(135deg, #00ffcc, #38bdf8); color: #030712; border: none; padding: 7px 14px; font-weight: bold; border-radius: 4px; cursor: pointer; font-size:12px; }
     button:hover { opacity: 0.85; }
     select, input { background: #1f2937; color: #fff; border: 1px solid #374151; padding: 6px; border-radius: 4px; font-family: inherit; }
     .user-badge { background: #1f2937; padding: 5px 8px; margin-bottom: 5px; border-radius: 4px; font-size: 12px; border-left: 3px solid #00ffcc; }
-    .ai-panel { background: #1e1b4b; border: 1px solid #4338ca; padding: 10px; border-radius: 6px; margin-top: 10px; font-size: 12px; color: #c7d2fe; display: flex; flex-direction: column; height: 170px; }
+    .ai-panel { background: #1e1b4b; border: 1px solid #4338ca; padding: 10px; border-radius: 6px; margin-top: 10px; font-size: 12px; color: #c7d2fe; display: flex; flex-direction: column; height: 170px; box-sizing: border-box; }
     .ai-chat-box { flex: 1; overflow-y: auto; background: #0f172a; padding: 6px; margin-bottom: 6px; border-radius: 4px; font-size: 11px; white-space: pre-wrap; }
-    .log-panel { background: #0f172a; border: 1px solid #1e293b; padding: 8px; border-radius: 6px; margin-top: 10px; height: 100px; overflow-y: auto; font-size: 11px; color: #94a3b8; }
+    .log-panel { background: #0f172a; border: 1px solid #1e293b; padding: 8px; border-radius: 6px; margin-top: 10px; height: 100px; overflow-y: auto; font-size: 11px; color: #94a3b8; box-sizing: border-box; }
 </style></head>
 <body>
     <div class="sidebar">
@@ -242,10 +248,10 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
             </div>
             <button onclick="runCode()">▶ Run Code</button>
         </div>
-        <textarea id="codeEditor"></textarea>
+        <textarea id="codeEditor" spellcheck="false"></textarea>
         <div class="terminal-pane">
             <div class="terminal-header">
-                <span>📊 Output Console (Type inside console and press Enter when input is requested)</span>
+                <span>📊 Output Console (Type input and press Enter)</span>
                 <span style="color: #4ade80;">● Interactive Terminal Active</span>
             </div>
             <textarea id="outputBox" spellcheck="false" placeholder="Console ready... Click 'Run Code' to start execution." onkeydown="handleConsoleKey(event)"></textarea>
@@ -253,25 +259,25 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
     </div>
     <script>
         const socket = io({
-    transports: ['polling'],
-    upgrade: true
-});
-const roomId = "{{ room_id }}";
-const editor = document.getElementById('codeEditor');
-const outputBox = document.getElementById('outputBox');
+            transports: ['polling', 'websocket'],
+            upgrade: true
+        });
+        const roomId = "{{ room_id }}";
+        const editor = document.getElementById('codeEditor');
+        const outputBox = document.getElementById('outputBox');
 
-let username = "Dev_" + Math.floor(Math.random()*1000);
-try {
-    let userInput = prompt("Enter your Developer Handle:");
-    if (userInput && userInput.trim() !== "") {
-        username = userInput.trim();
-    }
-} catch (e) {
-    console.log("Prompt blocked or failed, using default username.");
-}
-document.getElementById('userBadge').innerText = "🟢 " + username;
+        let username = "Dev_" + Math.floor(Math.random()*1000);
+        try {
+            let userInput = prompt("Enter your Developer Handle:");
+            if (userInput && userInput.trim() !== "") {
+                username = userInput.trim();
+            }
+        } catch (e) {
+            console.log("Prompt blocked or failed, using default username.");
+        }
+        document.getElementById('userBadge').innerText = "🟢 " + username;
 
-socket.emit('join_room_socket', { room_id: roomId });
+        socket.emit('join_room_socket', { room_id: roomId });
 
         socket.on('sync_code', (data) => {
             if(data.code && editor.value !== data.code) editor.value = data.code;
@@ -321,31 +327,27 @@ socket.emit('join_room_socket', { room_id: roomId });
             outputBox.scrollTop = outputBox.scrollHeight;
         });
 
-        let currentInputLine = "";
-
-function handleConsoleKey(e) {
-    if (e.key === 'Enter') {
-        e.preventDefault();
-        let text = outputBox.value;
-        // Extract only the newly typed text by getting everything after the last newline
-        let lines = text.split('\n');
-        let userInput = lines[lines.length - 1];
-        
-        // Send only the user input part to backend stdin
-        socket.emit('send_stdin_data', { room_id: roomId, input: userInput });
-        outputBox.value += '\n';
-        outputBox.scrollTop = outputBox.scrollHeight;
-    }
-}
+        function handleConsoleKey(e) {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                let text = outputBox.value;
+                let lines = text.split('\n');
+                let userInput = lines[lines.length - 1];
+                
+                socket.emit('send_stdin_data', { room_id: roomId, input: userInput });
+                outputBox.value += '\n';
+                outputBox.scrollTop = outputBox.scrollHeight;
+            }
+        }
 
         function sendAiQuery() {
             let q = document.getElementById('aiQueryInput').value; if(!q) return;
-            document.getElementById('aiChatBox').innerText += "\\nYou: " + q;
+            document.getElementById('aiChatBox'].innerText += "\nYou: " + q;
             socket.emit('ai_chat', { query: q, code: editor.value });
             document.getElementById('aiQueryInput').value = '';
         }
         socket.on('ai_response', (data) => {
-            document.getElementById('aiChatBox').innerText += "\\n" + data.reply;
+            document.getElementById('aiChatBox'].innerText += "\n" + data.reply;
             let chatBox = document.getElementById('aiChatBox');
             chatBox.scrollTop = chatBox.scrollHeight;
         });
