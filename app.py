@@ -13,11 +13,36 @@ from flask import Flask, render_template_string, request, redirect, url_for
 from flask_socketio import SocketIO, emit, join_room
 
 app = Flask(__name__)
-# Explicitly forcing threading mode as recommended by maintainers for subprocess/blocking I/O workloads
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+# Explicitly forcing threading mode as recommended by maintainers for subprocess/blocking I/O workloads.
+# logger/engineio_logger=True prints every handshake attempt to stdout, which
+# Render's Logs tab captures live - this turns "it's not connecting" into a
+# readable trail instead of a guess. Safe to turn off later once this is confirmed working.
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', logger=True, engineio_logger=True)
 
 rooms = {}
 rooms_lock = threading.Lock()
+
+import datetime
+
+@app.route('/health')
+def health():
+    import flask_socketio as _fsio
+    return {
+        'status': 'ok',
+        'time_utc': datetime.datetime.utcnow().isoformat(),
+        'python': sys.version,
+        'async_mode': getattr(socketio, 'async_mode', 'unknown'),
+        'flask_socketio_version': getattr(_fsio, '__version__', 'unknown'),
+        'rooms_in_memory': len(rooms),
+    }
+
+@socketio.on('connect')
+def handle_connect():
+    print(f"[socket] client connected sid={request.sid}", flush=True)
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    print(f"[socket] client disconnected sid={request.sid}", flush=True)
 
 @app.route('/')
 def home():
@@ -362,6 +387,18 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
     </script>
 
     <script>
+        // Independent of Socket.IO entirely: prove the backend process itself
+        // is alive by hitting a plain HTTP route. Shown in the activity log
+        // immediately, before any socket connection is attempted.
+        (function pingHealth() {
+            const lBox = document.getElementById('activityLog');
+            fetch('/health').then(r => r.json()).then(d => {
+                lBox.innerHTML = `<div style="color:#4ade80;">✅ Backend alive: Flask-SocketIO ${d.flask_socketio_version}, mode=${d.async_mode}</div>` + lBox.innerHTML;
+            }).catch(e => {
+                lBox.innerHTML = `<div style="color:#f87171;">❌ /health request itself failed: ${e}. The backend process is not reachable at all (deploy crashed, or still cold-starting).</div>` + lBox.innerHTML;
+            });
+        })();
+
         function initApp() {
             if (!window.io) { showCdnError(); return; }
 
@@ -371,19 +408,27 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
             // can hang forever with no error under a non-threaded server.
             const socket = io({ transports: ['polling', 'websocket'], upgrade: true, timeout: 20000 });
 
-            // Safety net: if we're still stuck "connecting" after 20s, show
+            function showRealError(msg) {
+                document.getElementById('userBadge').innerText = "🔴 Could not connect";
+                showCdnError();
+                document.querySelector('#cdnError').innerHTML =
+                    '⚠️ Socket.IO could not connect: <b>' + msg + '</b> ' +
+                    '<button onclick="location.reload()">Reload</button>';
+                let lBox = document.getElementById('activityLog');
+                lBox.innerHTML = `<div style="color:#f87171;">❌ Socket error: ${msg}</div>` + lBox.innerHTML;
+            }
+
+            // Safety net: if we're still stuck "connecting" after 12s, show
             // the same visible error instead of hanging silently forever.
             const connectWatchdog = setTimeout(() => {
-                if (!socket.connected) {
-                    document.getElementById('userBadge').innerText = "🔴 Could not connect (timeout)";
-                    showCdnError();
-                    document.querySelector('#cdnError').innerHTML =
-                        '⚠️ Connected to the page, but the real-time server never responded. ' +
-                        'This usually means the Render Start Command is wrong for Socket.IO. ' +
-                        '<button onclick="location.reload()">Reload</button>';
-                }
-            }, 20000);
+                if (!socket.connected) showRealError('timed out waiting for server response (12s)');
+            }, 12000);
             socket.on('connect', () => clearTimeout(connectWatchdog));
+            socket.on('connect_error', (err) => {
+                clearTimeout(connectWatchdog);
+                showRealError((err && (err.message || err.toString())) || 'unknown connect_error');
+                console.error("Socket connect_error:", err);
+            });
             const roomId = "{{ room_id }}";
             const editor = document.getElementById('codeEditor');
             const outputBox = document.getElementById('outputBox');
@@ -414,11 +459,6 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
                 document.getElementById('userBadge').innerText = "🔴 " + username + " (disconnected)";
                 document.getElementById('ptyStatus').style.color = '#f87171';
                 document.getElementById('ptyStatus').innerText = '● Disconnected';
-            });
-
-            socket.on('connect_error', (err) => {
-                document.getElementById('userBadge').innerText = "🔴 Connection failed";
-                console.error("Socket connect_error:", err);
             });
 
             socket.on('sync_code', (data) => {
