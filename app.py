@@ -217,7 +217,6 @@ def handle_start_run(data):
 
                 threading.Thread(target=read_output_pty, daemon=True).start()
             else:
-                # Fallback for Windows or non-PTY environments
                 process = subprocess.Popen(
                     cmd,
                     stdin=subprocess.PIPE,
@@ -419,3 +418,28 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
                 socket.emit('send_stdin_data', { room_id: roomId, input: userInput });
                 outputBox.value += '\n';
                 outputBox.scrollTop = outputBox.scrollHeight;
+            }
+        }
+
+        function sendAiQuery() {
+            let q = document.getElementById('aiQueryInput').value; if(!q) return;
+            document.getElementById('aiChatBox').innerText += "\nYou: " + q;
+            socket.emit('ai_chat', { query: q, code: editor.value });
+            document.getElementById('aiQueryInput').value = '';
+        }
+        socket.on('ai_response', (data) => {
+            document.getElementById('aiChatBox'].innerText += "\n" + data.reply;
+            let chatBox = document.getElementById('aiChatBox');
+            chatBox.scrollTop = chatBox.scrollHeight;
+        });
+
+        function triggerAiFix() {
+            socket.emit('ai_fix', { room_id: roomId, username: username });
+        }
+    </script>
+</body></html>
+"""
+
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 5005))
+    socketio.run(app, host='0.0.0.0', port=port, debug=False, allow_unsafe_werkzeug=True)
