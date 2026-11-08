@@ -6,19 +6,14 @@ import threading
 import uuid
 import secrets
 import select
+import pty
 import codecs
 import time
-
-try:
-    import pty
-    HAS_PTY = True
-except ImportError:
-    HAS_PTY = False
-
 from flask import Flask, render_template_string, request, redirect, url_for
 from flask_socketio import SocketIO, emit, join_room
 
 app = Flask(__name__)
+# Explicitly forcing threading mode as recommended by maintainers for subprocess/blocking I/O workloads
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 rooms = {}
@@ -30,10 +25,11 @@ def home():
 
 @app.route('/create')
 def create_room():
+    # Cryptographically secure room ID generation
     room_id = secrets.token_urlsafe(8)[:8]
     with rooms_lock:
         rooms[room_id] = {
-            'code': "# Welcome to Nexus Global Cloud IDE\nprint('Hello from Nexus Cloud!')",
+            'code': "# Welcome to Nexus Global Cloud IDE\nname = input('Enter your name: ')\nprint(f'Hello, {name}!')",
             'activity_log': ["🛡️ Room initialized securely."],
             'run_lock': threading.Lock(),
             'process': None,
@@ -82,13 +78,13 @@ def handle_ai(data):
     query = data.get('query', '').lower()
     code = data.get('code', '')
     if 'explain' in query:
-        reply = f"🤖 AI Copilot: Script contains {len(code.splitlines())} lines of code."
+        reply = f"🤖 AI Copilot: Script has {len(code.splitlines())} lines."
     elif 'optimize' in query:
-        reply = "🤖 AI Copilot Tip: Ensure proper loop bounds and use efficient built-in functions."
+        reply = "🤖 AI Copilot Tip: Use efficient loops and built-in functions."
     elif 'bug' in query or 'error' in query:
-        reply = "🤖 AI Audit: Lexical structure looks clean. No syntax anomalies detected."
+        reply = "🤖 AI Audit: No syntax anomalies detected."
     else:
-        reply = "🤖 AI Copilot: Ready to assist your collaborative session."
+        reply = "🤖 AI Copilot: Ready to assist."
     emit('ai_response', {'reply': reply}, room=request.sid)
 
 @socketio.on('ai_fix')
@@ -116,9 +112,9 @@ def handle_ai_fix(data):
 def handle_start_run(data):
     room_id = data.get('room_id')
     lang = data.get('language', 'python')
-    
+
     with rooms_lock:
-        if room_id not in rooms: 
+        if room_id not in rooms:
             return
         room = rooms[room_id]
         code = room['code']
@@ -133,6 +129,7 @@ def handle_start_run(data):
     target_sid = request.sid
 
     with run_lock:
+        # Kill any existing running process in this room safely
         old_proc = room.get('process')
         if old_proc and old_proc.poll() is None:
             try:
@@ -156,93 +153,79 @@ def handle_start_run(data):
                     return
                 cmd = [fname + '.out']
 
+            # Use Pseudo-Terminal (pty) for proper line-buffering and interactive prompts
+            master_fd, slave_fd = pty.openpty()
+
+            # Isolated environment variables for security
             safe_env = {
                 'PATH': os.environ.get('PATH', '/usr/bin:/bin'),
                 'LANG': 'en_US.UTF-8',
                 'HOME': tempfile.gettempdir()
             }
 
-            if HAS_PTY:
-                master_fd, slave_fd = pty.openpty()
-                process = subprocess.Popen(
-                    cmd,
-                    stdin=slave_fd,
-                    stdout=slave_fd,
-                    stderr=slave_fd,
-                    env=safe_env,
-                    start_new_session=True,
-                    text=False
-                )
-                os.close(slave_fd)
-                room['process'] = process
-                room['master_fd'] = master_fd
+            process = subprocess.Popen(
+                cmd,
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                env=safe_env,
+                start_new_session=True,  # Process group leader
+                text=False
+            )
+            os.close(slave_fd)
 
-                def read_output_pty():
-                    decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
-                    buffer = []
-                    last_flush = time.time()
-                    try:
-                        while True:
-                            r, _, _ = select.select([master_fd], [], [], 0.1)
-                            if r:
-                                try:
-                                    chunk = os.read(master_fd, 4096)
-                                    if not chunk:
-                                        break
-                                    buffer.append(decoder.decode(chunk))
-                                except OSError:
+            room['process'] = process
+            room['master_fd'] = master_fd
+
+            def read_output_batched():
+                decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
+                buffer = []
+                last_flush = time.time()
+
+                try:
+                    while True:
+                        r, _, _ = select.select([master_fd], [], [], 0.1)
+                        if r:
+                            try:
+                                chunk = os.read(master_fd, 4096)
+                                if not chunk:
                                     break
-                            now = time.time()
-                            if buffer and (now - last_flush > 0.04 or sum(len(b) for b in buffer) > 16384):
-                                socketio.emit('terminal_data', {'data': "".join(buffer)}, room=target_sid)
-                                buffer.clear()
-                                last_flush = now
-                            if process.poll() is not None and not r:
+                                decoded = decoder.decode(chunk)
+                                buffer.append(decoded)
+                            except OSError:
                                 break
-                    except Exception:
-                        pass
-                    if buffer:
-                        socketio.emit('terminal_data', {'data': "".join(buffer)}, room=target_sid)
-                    socketio.emit('terminal_data', {'data': "\n\n[Program finished]\n"}, room=target_sid)
-                    try:
-                        os.close(master_fd)
-                    except Exception:
-                        pass
-                    try:
-                        os.unlink(fname)
-                        if lang == 'cpp' and os.path.exists(fname + '.out'):
-                            os.unlink(fname + '.out')
-                    except Exception:
-                        pass
 
-                threading.Thread(target=read_output_pty, daemon=True).start()
-            else:
-                process = subprocess.Popen(
-                    cmd,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    env=safe_env,
-                    text=True,
-                    bufsize=1
-                )
-                room['process'] = process
+                        now = time.time()
+                        # Flush every 40ms or when buffer exceeds ~16KB
+                        current_len = sum(len(b) for b in buffer)
+                        if buffer and (now - last_flush > 0.04 or current_len > 16384):
+                            socketio.emit('terminal_data', {'data': "".join(buffer)}, room=target_sid)
+                            buffer.clear()
+                            last_flush = now
 
-                def read_output_pipe():
-                    try:
-                        for line in process.stdout:
-                            socketio.emit('terminal_data', {'data': line}, room=target_sid)
-                    except Exception:
-                        pass
-                    socketio.emit('terminal_data', {'data': "\n\n[Program finished]\n"}, room=target_sid)
-                    try:
-                        os.unlink(fname)
-                        if lang == 'cpp' and os.path.exists(fname + '.out'):
-                            os.unlink(fname + '.out')
-                    except Exception:
-                        pass
+                        if process.poll() is not None and not r:
+                            break
+                except Exception:
+                    pass
 
-                threading.Thread(target=read_output_pipe, daemon=True).start()
+                # Final flush
+                if buffer:
+                    socketio.emit('terminal_data', {'data': "".join(buffer)}, room=target_sid)
+
+                socketio.emit('terminal_data', {'data': "\n\n[Program finished]\n"}, room=target_sid)
+
+                try:
+                    os.close(master_fd)
+                except Exception:
+                    pass
+                try:
+                    os.unlink(fname)
+                    if lang == 'cpp' and os.path.exists(fname + '.out'):
+                        os.unlink(fname + '.out')
+                except Exception:
+                    pass
+
+            threading.Thread(target=read_output_batched, daemon=True).start()
 
         except Exception as e:
             emit('terminal_data', {'data': f"Execution Error: {str(e)}"}, room=target_sid)
@@ -256,15 +239,9 @@ def handle_stdin(data):
             room = rooms[room_id]
             master_fd = room.get('master_fd')
             proc = room.get('process')
-            if master_fd is not None and HAS_PTY and proc and proc.poll() is None:
+            if master_fd is not None and proc and proc.poll() is None:
                 try:
                     os.write(master_fd, (user_input + '\n').encode('utf-8'))
-                except Exception:
-                    pass
-            elif proc and proc.poll() is None and proc.stdin:
-                try:
-                    proc.stdin.write(user_input + '\n')
-                    proc.stdin.flush()
                 except Exception:
                     pass
 
@@ -272,13 +249,12 @@ HOME_PAGE = """<!DOCTYPE html><html><head><title>Nexus Global Cloud IDE</title><
 <body style="background:#090d16; color:#fff; font-family:'Segoe UI',sans-serif; display:flex; justify-content:center; align-items:center; height:100vh; margin:0;">
     <div style="text-align:center; background:#111827; padding:45px; border-radius:12px; border:1px solid #1f2937;">
         <h1 style="color:#00ffcc;">🌐 Nexus Universal Cloud IDE</h1>
-        <p style="color:#94a3b8; margin-bottom:25px;">Robust Execution Engine Enabled.</p>
+        <p style="color:#94a3b8; margin-bottom:25px;">Batched Emits & PTY Interactive Terminal Enabled.</p>
         <a href="/create"><button style="background:linear-gradient(135deg, #00ffcc, #38bdf8); color:#030712; border:none; padding:14px 28px; font-weight:bold; border-radius:6px; cursor:pointer;">Launch New Room</button></a>
     </div>
 </body></html>"""
 
 ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>Nexus Room - {{ room_id }}</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
 <style>
     body { margin: 0; background: #0b0f19; color: #00ffcc; font-family: 'Courier New', monospace; display: flex; height: 100vh; overflow: hidden; }
     .sidebar { width: 320px; background: #111827; border-right: 1px solid #1f2937; display: flex; flex-direction: column; padding: 15px; overflow-y: auto; box-sizing: border-box; }
@@ -290,21 +266,28 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
     #outputBox { margin: 0; padding: 12px; font-size: 13px; color: #4ade80; overflow-y: auto; flex: 1; white-space: pre-wrap; background: #020617; border: none; outline: none; font-family: 'Courier New', monospace; box-sizing: border-box; }
     button { background: linear-gradient(135deg, #00ffcc, #38bdf8); color: #030712; border: none; padding: 7px 14px; font-weight: bold; border-radius: 4px; cursor: pointer; font-size:12px; }
     button:hover { opacity: 0.85; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
     select, input { background: #1f2937; color: #fff; border: 1px solid #374151; padding: 6px; border-radius: 4px; font-family: inherit; }
     .user-badge { background: #1f2937; padding: 5px 8px; margin-bottom: 5px; border-radius: 4px; font-size: 12px; border-left: 3px solid #00ffcc; }
     .ai-panel { background: #1e1b4b; border: 1px solid #4338ca; padding: 10px; border-radius: 6px; margin-top: 10px; font-size: 12px; color: #c7d2fe; display: flex; flex-direction: column; height: 170px; box-sizing: border-box; }
     .ai-chat-box { flex: 1; overflow-y: auto; background: #0f172a; padding: 6px; margin-bottom: 6px; border-radius: 4px; font-size: 11px; white-space: pre-wrap; }
     .log-panel { background: #0f172a; border: 1px solid #1e293b; padding: 8px; border-radius: 6px; margin-top: 10px; height: 100px; overflow-y: auto; font-size: 11px; color: #94a3b8; box-sizing: border-box; }
+    #cdnError { display:none; position:fixed; top:0; left:0; right:0; background:#7f1d1d; color:#fff; padding:10px 16px; font-size:13px; z-index:9999; text-align:center; }
+    #cdnError button { margin-left:12px; background:#fff; color:#7f1d1d; }
 </style></head>
 <body>
+    <div id="cdnError">
+        ⚠️ Could not load the real-time engine (Socket.IO) from any CDN. Check your internet connection or ad/script blocker and reload.
+        <button onclick="location.reload()">Reload</button>
+    </div>
     <div class="sidebar">
         <h3 style="color: #00ffcc; margin-top:0;">🌐 Room: {{ room_id }}</h3>
         <p style="font-size: 12px; color: #94a3b8; margin: 5px 0;">Developer Handle:</p>
-        <div id="userBadge" class="user-badge">🟢 Connected</div>
-        
+        <div id="userBadge" class="user-badge">🟡 Connecting...</div>
+
         <div style="display: flex; gap: 5px; margin-top: 10px;">
-            <button onclick="saveCloud()" style="flex:1; background:#10b981; color:#fff;">💾 Save Cloud</button>
-            <button onclick="downloadCode()" style="flex:1; background:#3b82f6; color:#fff;">📥 Download</button>
+            <button id="btnSave" onclick="saveCloud()" style="flex:1; background:#10b981; color:#fff;" disabled>💾 Save Cloud</button>
+            <button id="btnDownload" onclick="downloadCode()" style="flex:1; background:#3b82f6; color:#fff;" disabled>📥 Download</button>
         </div>
 
         <div class="ai-panel">
@@ -312,9 +295,9 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
             <div id="aiChatBox" class="ai-chat-box">Ask AI: 'explain', 'optimize', or 'find bugs'...</div>
             <div style="display: flex; gap: 5px;">
                 <input type="text" id="aiQueryInput" placeholder="Ask AI..." style="flex:1; font-size:11px; padding:4px;">
-                <button onclick="sendAiQuery()" style="padding: 4px 8px; font-size:11px;">Send</button>
+                <button id="btnAiSend" onclick="sendAiQuery()" style="padding: 4px 8px; font-size:11px;" disabled>Send</button>
             </div>
-            <button onclick="triggerAiFix()" style="width:100%; background:#4f46e5; color:#fff; padding:5px; font-size:11px; margin-top:5px;">⚡ Quick AI Auto-Fix</button>
+            <button id="btnAiFix" onclick="triggerAiFix()" style="width:100%; background:#4f46e5; color:#fff; padding:5px; font-size:11px; margin-top:5px;" disabled>⚡ Quick AI Auto-Fix</button>
         </div>
 
         <p style="font-size: 12px; color: #94a3b8; margin: 10px 0 5px 0;">📜 Live Activity Log:</p>
@@ -330,111 +313,172 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
                     <option value="cpp">C++</option>
                 </select>
             </div>
-            <button onclick="runCode()">▶ Run Code</button>
+            <button id="btnRun" onclick="runCode()" disabled>▶ Run Code</button>
         </div>
         <textarea id="codeEditor" spellcheck="false"></textarea>
         <div class="terminal-pane">
             <div class="terminal-header">
-                <span>📊 Output Console</span>
-                <span style="color: #4ade80;">● Terminal Active</span>
+                <span>📊 Output Console (Type input and press Enter)</span>
+                <span id="ptyStatus" style="color: #f87171;">● Disconnected</span>
             </div>
-            <textarea id="outputBox" spellcheck="false" placeholder="Console ready... Click 'Run Code' to start execution." onkeydown="handleConsoleKey(event)"></textarea>
+            <textarea id="outputBox" spellcheck="false" placeholder="Connecting to server..." onkeydown="handleConsoleKey(event)"></textarea>
         </div>
     </div>
+
+    <!--
+      Defensive Socket.IO client loading: try the primary CDN first, and if the
+      <script> tag itself fails to load (blocked, offline, CDN down), fall back
+      to a second CDN before giving up and showing a visible error banner.
+      Nothing else on the page runs until a client has actually loaded, so a
+      blocked script can no longer silently break every button on the page.
+    -->
     <script>
-        const socket = io({ transports: ['polling', 'websocket'], upgrade: true });
-        const roomId = "{{ room_id }}";
-        const editor = document.getElementById('codeEditor');
-        const outputBox = document.getElementById('outputBox');
+        function showCdnError() {
+            document.getElementById('cdnError').style.display = 'block';
+            document.getElementById('userBadge').innerText = '🔴 Offline';
+        }
+        function loadScript(src, onOk, onFail) {
+            var s = document.createElement('script');
+            s.src = src;
+            s.onload = onOk;
+            s.onerror = onFail;
+            document.head.appendChild(s);
+        }
+        function bootSocketIO() {
+            if (window.io) { initApp(); return; }
+            loadScript(
+                'https://cdn.socket.io/4.7.5/socket.io.min.js',
+                initApp,
+                function () {
+                    loadScript(
+                        'https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js',
+                        initApp,
+                        showCdnError
+                    );
+                }
+            );
+        }
+        bootSocketIO();
+    </script>
 
-        let username = "Dev_" + Math.floor(Math.random()*1000);
-        try {
-            let userInput = prompt("Enter your Developer Handle:");
-            if (userInput && userInput.trim() !== "") {
-                username = userInput.trim();
+    <script>
+        function initApp() {
+            if (!window.io) { showCdnError(); return; }
+
+            const socket = io({ transports: ['websocket', 'polling'], upgrade: true });
+            const roomId = "{{ room_id }}";
+            const editor = document.getElementById('codeEditor');
+            const outputBox = document.getElementById('outputBox');
+
+            let username = "Dev_" + Math.floor(Math.random() * 1000);
+            try {
+                let userInput = prompt("Enter your Developer Handle:");
+                if (userInput && userInput.trim() !== "") {
+                    username = userInput.trim();
+                }
+            } catch (e) {
+                console.log("Prompt skipped.");
             }
-        } catch (e) {
-            console.log("Prompt skipped.");
-        }
-        document.getElementById('userBadge').innerText = "🟢 " + username;
+            document.getElementById('userBadge').innerText = "🟡 " + username + " (connecting...)";
 
-        socket.emit('join_room_socket', { room_id: roomId });
+            socket.on('connect', () => {
+                document.getElementById('userBadge').innerText = "🟢 " + username;
+                document.getElementById('ptyStatus').style.color = '#4ade80';
+                document.getElementById('ptyStatus').innerText = '● Interactive PTY Active';
+                outputBox.placeholder = "Console ready... Click 'Run Code' to start execution.";
+                ['btnSave', 'btnDownload', 'btnAiSend', 'btnAiFix', 'btnRun'].forEach(id => {
+                    document.getElementById(id).disabled = false;
+                });
+                socket.emit('join_room_socket', { room_id: roomId });
+            });
 
-        socket.on('sync_code', (data) => {
-            if(data.code && editor.value !== data.code) editor.value = data.code;
-            if(data.logs) updateLogs(data.logs);
-        });
+            socket.on('disconnect', () => {
+                document.getElementById('userBadge').innerText = "🔴 " + username + " (disconnected)";
+                document.getElementById('ptyStatus').style.color = '#f87171';
+                document.getElementById('ptyStatus').innerText = '● Disconnected';
+            });
 
-        socket.on('sync_logs', (data) => {
-            if(data.logs) updateLogs(data.logs);
-        });
+            socket.on('connect_error', (err) => {
+                document.getElementById('userBadge').innerText = "🔴 Connection failed";
+                console.error("Socket connect_error:", err);
+            });
 
-        function updateLogs(logs) {
-            let lBox = document.getElementById('activityLog');
-            lBox.innerHTML = logs.map(l => `<div>• ${l}</div>`).join('');
-        }
+            socket.on('sync_code', (data) => {
+                if (data.code && editor.value !== data.code) editor.value = data.code;
+                if (data.logs) updateLogs(data.logs);
+            });
 
-        let isRemote = false;
-        editor.addEventListener('input', () => {
-            if(isRemote) return;
-            socket.emit('update_code', { room_id: roomId, code: editor.value });
-        });
+            socket.on('sync_logs', (data) => {
+                if (data.logs) updateLogs(data.logs);
+            });
 
-        function saveCloud() {
-            socket.emit('save_cloud', { room_id: roomId, username: username });
-        }
-        socket.on('notification', (data) => { alert(data.msg); });
+            function updateLogs(logs) {
+                let lBox = document.getElementById('activityLog');
+                lBox.innerHTML = logs.map(l => `<div>• ${l}</div>`).join('');
+            }
 
-        function downloadCode() {
-            let lang = document.getElementById('langSelect').value;
-            let ext = (lang === 'javascript') ? 'js' : (lang === 'cpp') ? 'cpp' : 'py';
-            let blob = new Blob([editor.value], { type: 'text/plain;charset=utf-8' });
-            let url = URL.createObjectURL(blob);
-            let a = document.createElement('a');
-            a.href = url;
-            a.download = `nexus_code_${roomId}.${ext}`;
-            a.click();
-            URL.revokeObjectURL(url);
-        }
+            let isRemote = false;
+            editor.addEventListener('input', () => {
+                if (isRemote) return;
+                socket.emit('update_code', { room_id: roomId, code: editor.value });
+            });
 
-        function runCode() {
-            let lang = document.getElementById('langSelect').value;
-            outputBox.value = "Initializing execution...\n";
-            socket.emit('start_interactive_run', { room_id: roomId, language: lang, username: username });
-        }
+            window.saveCloud = function () {
+                socket.emit('save_cloud', { room_id: roomId, username: username });
+            };
+            socket.on('notification', (data) => { alert(data.msg); });
 
-        socket.on('terminal_data', (data) => {
-            outputBox.value += data.data;
-            outputBox.scrollTop = outputBox.scrollHeight;
-        });
+            window.downloadCode = function () {
+                let lang = document.getElementById('langSelect').value;
+                let ext = (lang === 'javascript') ? 'js' : (lang === 'cpp') ? 'cpp' : 'py';
+                let blob = new Blob([editor.value], { type: 'text/plain;charset=utf-8' });
+                let url = URL.createObjectURL(blob);
+                let a = document.createElement('a');
+                a.href = url;
+                a.download = `nexus_code_${roomId}.${ext}`;
+                a.click();
+                URL.revokeObjectURL(url);
+            };
 
-        function handleConsoleKey(e) {
-            if (e.key === 'Enter') {
-                e.preventDefault();
-                let text = outputBox.value;
-                let lines = text.split('\n');
-                let userInput = lines[lines.length - 1];
-                
-                socket.emit('send_stdin_data', { room_id: roomId, input: userInput });
-                outputBox.value += '\n';
+            window.runCode = function () {
+                let lang = document.getElementById('langSelect').value;
+                outputBox.value = "Initializing batched pty execution...\n";
+                socket.emit('start_interactive_run', { room_id: roomId, language: lang, username: username });
+            };
+
+            socket.on('terminal_data', (data) => {
+                outputBox.value += data.data;
                 outputBox.scrollTop = outputBox.scrollHeight;
-            }
-        }
+            });
 
-        function sendAiQuery() {
-            let q = document.getElementById('aiQueryInput').value; if(!q) return;
-            document.getElementById('aiChatBox').innerText += "\\nYou: " + q;
-            socket.emit('ai_chat', { query: q, code: editor.value });
-            document.getElementById('aiQueryInput').value = '';
-        }
-        socket.on('ai_response', (data) => {
-            document.getElementById('aiChatBox').innerText += "\\n" + data.reply;
-            let chatBox = document.getElementById('aiChatBox');
-            chatBox.scrollTop = chatBox.scrollHeight;
-        });
+            window.handleConsoleKey = function (e) {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    let text = outputBox.value;
+                    let lines = text.split('\n');
+                    let userInput = lines[lines.length - 1];
 
-        function triggerAiFix() {
-            socket.emit('ai_fix', { room_id: roomId, username: username });
+                    socket.emit('send_stdin_data', { room_id: roomId, input: userInput });
+                    outputBox.value += '\n';
+                    outputBox.scrollTop = outputBox.scrollHeight;
+                }
+            };
+
+            window.sendAiQuery = function () {
+                let q = document.getElementById('aiQueryInput').value; if (!q) return;
+                document.getElementById('aiChatBox').innerText += "\nYou: " + q;
+                socket.emit('ai_chat', { query: q, code: editor.value });
+                document.getElementById('aiQueryInput').value = '';
+            };
+            socket.on('ai_response', (data) => {
+                document.getElementById('aiChatBox').innerText += "\n" + data.reply;
+                let chatBox = document.getElementById('aiChatBox');
+                chatBox.scrollTop = chatBox.scrollHeight;
+            });
+
+            window.triggerAiFix = function () {
+                socket.emit('ai_fix', { room_id: roomId, username: username });
+            };
         }
     </script>
 </body></html>
