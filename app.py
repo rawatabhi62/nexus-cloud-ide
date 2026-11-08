@@ -4,10 +4,16 @@ import tempfile
 import subprocess
 import threading
 import uuid
+import secrets
+import select
+import pty
+import codecs
+import time
 from flask import Flask, render_template_string, request, redirect, url_for
 from flask_socketio import SocketIO, emit, join_room
 
 app = Flask(__name__)
+# Explicitly forcing threading mode as recommended by maintainers for subprocess/blocking I/O workloads
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 rooms = {}
@@ -19,11 +25,15 @@ def home():
 
 @app.route('/create')
 def create_room():
-    room_id = str(uuid.uuid4())[:8]
+    # Cryptographically secure room ID generation
+    room_id = secrets.token_urlsafe(8)[:8]
     with rooms_lock:
         rooms[room_id] = {
             'code': "# Welcome to Nexus Global Cloud IDE\nname = input('Enter your name: ')\nprint(f'Hello, {name}!')",
-            'activity_log': ["🛡️ Room initialized successfully."]
+            'activity_log': ["🛡️ Room initialized securely."],
+            'run_lock': threading.Lock(),
+            'process': None,
+            'master_fd': None
         }
     return redirect(url_for('join_room_page', room_id=room_id))
 
@@ -31,10 +41,7 @@ def create_room():
 def join_room_page(room_id):
     with rooms_lock:
         if room_id not in rooms:
-            rooms[room_id] = {
-                'code': "# Welcome to Nexus Global Cloud IDE\nname = input('Enter your name: ')\nprint(f'Hello, {name}!')",
-                'activity_log': ["🛡️ Room initialized."]
-            }
+            return "Room not found or expired! <a href='/'>Create a new room</a>", 404
     return render_template_string(ROOM_PAGE, room_id=room_id)
 
 @socketio.on('join_room_socket')
@@ -61,6 +68,8 @@ def handle_save(data):
     with rooms_lock:
         if room_id in rooms:
             rooms[room_id]['activity_log'].insert(0, f"💾 {username} saved cloud checkpoint.")
+            if len(rooms[room_id]['activity_log']) > 100:
+                rooms[room_id]['activity_log'].pop()
             emit('sync_logs', {'logs': rooms[room_id]['activity_log']}, room=room_id)
             emit('notification', {'msg': '✅ Code successfully saved to cloud!'}, room=request.sid)
 
@@ -68,7 +77,6 @@ def handle_save(data):
 def handle_ai(data):
     query = data.get('query', '').lower()
     code = data.get('code', '')
-    reply = ""
     if 'explain' in query:
         reply = f"🤖 AI Copilot: Script has {len(code.splitlines())} lines."
     elif 'optimize' in query:
@@ -104,10 +112,13 @@ def handle_ai_fix(data):
 def handle_start_run(data):
     room_id = data.get('room_id')
     lang = data.get('language', 'python')
+    
     with rooms_lock:
         if room_id not in rooms: 
             return
-        code = rooms[room_id]['code']
+        room = rooms[room_id]
+        code = room['code']
+        run_lock = room['run_lock']
 
     ext = '.py' if lang == 'python' else '.js' if lang == 'javascript' else '.cpp'
     with tempfile.NamedTemporaryFile(mode='w', suffix=ext, delete=False, encoding='utf-8') as f:
@@ -115,70 +126,122 @@ def handle_start_run(data):
         fname = f.name
 
     cmd = [sys.executable, '-u', fname] if lang == 'python' else ['node', fname] if lang == 'javascript' else ['g++', fname, '-o', fname + '.out']
-    
-    target_sid = request.sid 
+    target_sid = request.sid
 
-    try:
-        if lang == 'cpp':
-            comp = subprocess.run(cmd, capture_output=True, text=True)
-            if comp.returncode != 0:
-                emit('terminal_data', {'data': f"C++ Compilation Error:\n{comp.stderr}"}, room=target_sid)
-                try:
+    with run_lock:
+        # Kill any existing running process in this room safely
+        old_proc = room.get('process')
+        if old_proc and old_proc.poll() is None:
+            try:
+                old_proc.terminate()
+            except Exception:
+                pass
+        if room.get('master_fd') is not None:
+            try:
+                os.close(room['master_fd'])
+            except Exception:
+                pass
+
+        try:
+            if lang == 'cpp':
+                comp = subprocess.run(cmd, capture_output=True, text=True)
+                if comp.returncode != 0:
+                    emit('terminal_data', {'data': f"C++ Compilation Error:\n{comp.stderr}"}, room=target_sid)
                     os.unlink(fname)
                     if os.path.exists(fname + '.out'):
                         os.unlink(fname + '.out')
+                    return
+                cmd = [fname + '.out']
+
+            # Use Pseudo-Terminal (pty) for proper line-buffering and interactive prompts
+            master_fd, slave_fd = pty.openpty()
+            
+            # Isolated environment variables for security
+            safe_env = {
+                'PATH': os.environ.get('PATH', '/usr/bin:/bin'),
+                'LANG': 'en_US.UTF-8',
+                'HOME': tempfile.gettempdir()
+            }
+
+            process = subprocess.Popen(
+                cmd,
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                env=safe_env,
+                start_new_session=True, # Process group leader
+                text=False
+            )
+            os.close(slave_fd)
+
+            room['process'] = process
+            room['master_fd'] = master_fd
+
+            def read_output_batched():
+                decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
+                buffer = []
+                last_flush = time.time()
+
+                try:
+                    while True:
+                        r, _, _ = select.select([master_fd], [], [], 0.1)
+                        if r:
+                            try:
+                                chunk = os.read(master_fd, 4096)
+                                if not chunk:
+                                    break
+                                decoded = decoder.decode(chunk)
+                                buffer.append(decoded)
+                            except OSError:
+                                break
+
+                        now = time.time()
+                        # Flush every 40ms or when buffer exceeds ~16KB
+                        current_len = sum(len(b) for b in buffer)
+                        if buffer and (now - last_flush > 0.04 or current_len > 16384):
+                            socketio.emit('terminal_data', {'data': "".join(buffer)}, room=target_sid)
+                            buffer.clear()
+                            last_flush = now
+
+                        if process.poll() is not None and not r:
+                            break
                 except Exception:
                     pass
-                return
-            cmd = [fname + '.out']
 
-        process = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1
-        )
+                # Final flush
+                if buffer:
+                    socketio.emit('terminal_data', {'data': "".join(buffer)}, room=target_sid)
 
-        with rooms_lock:
-            if room_id in rooms:
-                rooms[room_id]['process'] = process
+                socketio.emit('terminal_data', {'data': "\n\n[Program finished]\n"}, room=target_sid)
+                
+                try:
+                    os.close(master_fd)
+                except Exception:
+                    pass
+                try:
+                    os.unlink(fname)
+                    if lang == 'cpp' and os.path.exists(fname + '.out'):
+                        os.unlink(fname + '.out')
+                except Exception:
+                    pass
 
-        def read_output():
-            try:
-                while True:
-                    char = process.stdout.read(1)
-                    if not char:
-                        break
-                    socketio.emit('terminal_data', {'data': char}, room=target_sid)
-                process.stdout.close()
-            except Exception:
-                pass
-            socketio.emit('terminal_data', {'data': "\n\n[Program finished]\n"}, room=target_sid)
-            try:
-                os.unlink(fname)
-                if lang == 'cpp' and os.path.exists(fname + '.out'):
-                    os.unlink(fname + '.out')
-            except Exception:
-                pass
+            threading.Thread(target=read_output_batched, daemon=True).start()
 
-        threading.Thread(target=read_output, daemon=True).start()
-
-    except Exception as e:
-        emit('terminal_data', {'data': f"Execution Error: {str(e)}"}, room=target_sid)
+        except Exception as e:
+            emit('terminal_data', {'data': f"Execution Error: {str(e)}"}, room=target_sid)
 
 @socketio.on('send_stdin_data')
 def handle_stdin(data):
     room_id = data.get('room_id')
     user_input = data.get('input', '')
     with rooms_lock:
-        if room_id in rooms and 'process' in rooms[room_id]:
-            proc = rooms[room_id]['process']
-            if proc.poll() is None:
+        if room_id in rooms:
+            room = rooms[room_id]
+            master_fd = room.get('master_fd')
+            proc = room.get('process')
+            if master_fd is not None and proc and proc.poll() is None:
                 try:
-                    proc.stdin.write(user_input + '\n')
-                    proc.stdin.flush()
+                    os.write(master_fd, (user_input + '\n').encode('utf-8'))
                 except Exception:
                     pass
 
@@ -186,7 +249,7 @@ HOME_PAGE = """<!DOCTYPE html><html><head><title>Nexus Global Cloud IDE</title><
 <body style="background:#090d16; color:#fff; font-family:'Segoe UI',sans-serif; display:flex; justify-content:center; align-items:center; height:100vh; margin:0;">
     <div style="text-align:center; background:#111827; padding:45px; border-radius:12px; border:1px solid #1f2937;">
         <h1 style="color:#00ffcc;">🌐 Nexus Universal Cloud IDE</h1>
-        <p style="color:#94a3b8; margin-bottom:25px;">Interactive Terminal Enabled.</p>
+        <p style="color:#94a3b8; margin-bottom:25px;">Batched Emits & PTY Interactive Terminal Enabled.</p>
         <a href="/create"><button style="background:linear-gradient(135deg, #00ffcc, #38bdf8); color:#030712; border:none; padding:14px 28px; font-weight:bold; border-radius:6px; cursor:pointer;">Launch New Room</button></a>
     </div>
 </body></html>"""
@@ -201,9 +264,7 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
     textarea { flex: 1; background: #030712; color: #38bdf8; border: none; font-size: 14px; padding: 15px; resize: none; outline: none; line-height: 1.5; overflow-y: auto; box-sizing: border-box; }
     .terminal-pane { height: 38vh; background: #020617; border-top: 1px solid #1f2937; display: flex; flex-direction: column; flex-shrink: 0; }
     .terminal-header { background: #0f172a; padding: 8px 15px; font-size: 13px; font-weight: bold; color: #38bdf8; display: flex; justify-content: space-between; align-items:center; }
-    
     #outputBox { margin: 0; padding: 12px; font-size: 13px; color: #4ade80; overflow-y: auto; flex: 1; white-space: pre-wrap; background: #020617; border: none; outline: none; font-family: 'Courier New', monospace; box-sizing: border-box; }
-    
     button { background: linear-gradient(135deg, #00ffcc, #38bdf8); color: #030712; border: none; padding: 7px 14px; font-weight: bold; border-radius: 4px; cursor: pointer; font-size:12px; }
     button:hover { opacity: 0.85; }
     select, input { background: #1f2937; color: #fff; border: 1px solid #374151; padding: 6px; border-radius: 4px; font-family: inherit; }
@@ -252,16 +313,13 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
         <div class="terminal-pane">
             <div class="terminal-header">
                 <span>📊 Output Console (Type input and press Enter)</span>
-                <span style="color: #4ade80;">● Interactive Terminal Active</span>
+                <span style="color: #4ade80;">● Interactive PTY Active</span>
             </div>
             <textarea id="outputBox" spellcheck="false" placeholder="Console ready... Click 'Run Code' to start execution." onkeydown="handleConsoleKey(event)"></textarea>
         </div>
     </div>
     <script>
-        const socket = io({
-            transports: ['polling', 'websocket'],
-            upgrade: true
-        });
+        const socket = io({ transports: ['polling', 'websocket'], upgrade: true });
         const roomId = "{{ room_id }}";
         const editor = document.getElementById('codeEditor');
         const outputBox = document.getElementById('outputBox');
@@ -273,7 +331,7 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
                 username = userInput.trim();
             }
         } catch (e) {
-            console.log("Prompt blocked or failed, using default username.");
+            console.log("Prompt skipped.");
         }
         document.getElementById('userBadge').innerText = "🟢 " + username;
 
@@ -318,7 +376,7 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
 
         function runCode() {
             let lang = document.getElementById('langSelect').value;
-            outputBox.value = "Initializing execution...\n";
+            outputBox.value = "Initializing batched pty execution...\n";
             socket.emit('start_interactive_run', { room_id: roomId, language: lang, username: username });
         }
 
@@ -342,12 +400,12 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
 
         function sendAiQuery() {
             let q = document.getElementById('aiQueryInput').value; if(!q) return;
-            document.getElementById('aiChatBox'].innerText += "\nYou: " + q;
+            document.getElementById('aiChatBox').innerText += "\\nYou: " + q;
             socket.emit('ai_chat', { query: q, code: editor.value });
             document.getElementById('aiQueryInput').value = '';
         }
         socket.on('ai_response', (data) => {
-            document.getElementById('aiChatBox'].innerText += "\n" + data.reply;
+            document.getElementById('aiChatBox').innerText += "\\n" + data.reply;
             let chatBox = document.getElementById('aiChatBox');
             chatBox.scrollTop = chatBox.scrollHeight;
         });
