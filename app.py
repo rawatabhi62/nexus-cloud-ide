@@ -33,7 +33,7 @@ def create_room():
     room_id = secrets.token_urlsafe(8)[:8]
     with rooms_lock:
         rooms[room_id] = {
-            'code': "# Welcome to Nexus Global Cloud IDE\nprint('Hello, World!')",
+            'code': "# Welcome to Nexus Global Cloud IDE\nprint('Hello from Nexus Cloud!')",
             'activity_log': ["🛡️ Room initialized securely."],
             'run_lock': threading.Lock(),
             'process': None,
@@ -82,13 +82,13 @@ def handle_ai(data):
     query = data.get('query', '').lower()
     code = data.get('code', '')
     if 'explain' in query:
-        reply = f"🤖 AI Copilot: Script has {len(code.splitlines())} lines."
+        reply = f"🤖 AI Copilot: Script contains {len(code.splitlines())} lines of code."
     elif 'optimize' in query:
-        reply = "🤖 AI Copilot Tip: Use efficient loops and built-in functions."
+        reply = "🤖 AI Copilot Tip: Ensure proper loop bounds and use efficient built-in functions."
     elif 'bug' in query or 'error' in query:
-        reply = "🤖 AI Audit: No syntax anomalies detected."
+        reply = "🤖 AI Audit: Lexical structure looks clean. No syntax anomalies detected."
     else:
-        reply = "🤖 AI Copilot: Ready to assist."
+        reply = "🤖 AI Copilot: Ready to assist your collaborative session."
     emit('ai_response', {'reply': reply}, room=request.sid)
 
 @socketio.on('ai_fix')
@@ -423,12 +423,12 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
 
         function sendAiQuery() {
             let q = document.getElementById('aiQueryInput').value; if(!q) return;
-            document.getElementById('aiChatBox').innerText += "\nYou: " + q;
+            document.getElementById('aiChatBox').innerText += "\\nYou: " + q;
             socket.emit('ai_chat', { query: q, code: editor.value });
             document.getElementById('aiQueryInput').value = '';
         }
         socket.on('ai_response', (data) => {
-            document.getElementById('aiChatBox'].innerText += "\n" + data.reply;
+            document.getElementById('aiChatBox').innerText += "\\n" + data.reply;
             let chatBox = document.getElementById('aiChatBox');
             chatBox.scrollTop = chatBox.scrollHeight;
         });
