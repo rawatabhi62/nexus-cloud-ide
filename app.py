@@ -6,14 +6,19 @@ import threading
 import uuid
 import secrets
 import select
-import pty
 import codecs
 import time
+
+try:
+    import pty
+    HAS_PTY = True
+except ImportError:
+    HAS_PTY = False
+
 from flask import Flask, render_template_string, request, redirect, url_for
 from flask_socketio import SocketIO, emit, join_room
 
 app = Flask(__name__)
-# Explicitly forcing threading mode as recommended by maintainers for subprocess/blocking I/O workloads
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 rooms = {}
@@ -25,11 +30,10 @@ def home():
 
 @app.route('/create')
 def create_room():
-    # Cryptographically secure room ID generation
     room_id = secrets.token_urlsafe(8)[:8]
     with rooms_lock:
         rooms[room_id] = {
-            'code': "# Welcome to Nexus Global Cloud IDE\nname = input('Enter your name: ')\nprint(f'Hello, {name}!')",
+            'code': "# Welcome to Nexus Global Cloud IDE\nprint('Hello, World!')",
             'activity_log': ["🛡️ Room initialized securely."],
             'run_lock': threading.Lock(),
             'process': None,
@@ -129,7 +133,6 @@ def handle_start_run(data):
     target_sid = request.sid
 
     with run_lock:
-        # Kill any existing running process in this room safely
         old_proc = room.get('process')
         if old_proc and old_proc.poll() is None:
             try:
@@ -153,79 +156,94 @@ def handle_start_run(data):
                     return
                 cmd = [fname + '.out']
 
-            # Use Pseudo-Terminal (pty) for proper line-buffering and interactive prompts
-            master_fd, slave_fd = pty.openpty()
-            
-            # Isolated environment variables for security
             safe_env = {
                 'PATH': os.environ.get('PATH', '/usr/bin:/bin'),
                 'LANG': 'en_US.UTF-8',
                 'HOME': tempfile.gettempdir()
             }
 
-            process = subprocess.Popen(
-                cmd,
-                stdin=slave_fd,
-                stdout=slave_fd,
-                stderr=slave_fd,
-                env=safe_env,
-                start_new_session=True, # Process group leader
-                text=False
-            )
-            os.close(slave_fd)
+            if HAS_PTY:
+                master_fd, slave_fd = pty.openpty()
+                process = subprocess.Popen(
+                    cmd,
+                    stdin=slave_fd,
+                    stdout=slave_fd,
+                    stderr=slave_fd,
+                    env=safe_env,
+                    start_new_session=True,
+                    text=False
+                )
+                os.close(slave_fd)
+                room['process'] = process
+                room['master_fd'] = master_fd
 
-            room['process'] = process
-            room['master_fd'] = master_fd
-
-            def read_output_batched():
-                decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
-                buffer = []
-                last_flush = time.time()
-
-                try:
-                    while True:
-                        r, _, _ = select.select([master_fd], [], [], 0.1)
-                        if r:
-                            try:
-                                chunk = os.read(master_fd, 4096)
-                                if not chunk:
+                def read_output_pty():
+                    decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
+                    buffer = []
+                    last_flush = time.time()
+                    try:
+                        while True:
+                            r, _, _ = select.select([master_fd], [], [], 0.1)
+                            if r:
+                                try:
+                                    chunk = os.read(master_fd, 4096)
+                                    if not chunk:
+                                        break
+                                    buffer.append(decoder.decode(chunk))
+                                except OSError:
                                     break
-                                decoded = decoder.decode(chunk)
-                                buffer.append(decoded)
-                            except OSError:
+                            now = time.time()
+                            if buffer and (now - last_flush > 0.04 or sum(len(b) for b in buffer) > 16384):
+                                socketio.emit('terminal_data', {'data': "".join(buffer)}, room=target_sid)
+                                buffer.clear()
+                                last_flush = now
+                            if process.poll() is not None and not r:
                                 break
+                    except Exception:
+                        pass
+                    if buffer:
+                        socketio.emit('terminal_data', {'data': "".join(buffer)}, room=target_sid)
+                    socketio.emit('terminal_data', {'data': "\n\n[Program finished]\n"}, room=target_sid)
+                    try:
+                        os.close(master_fd)
+                    except Exception:
+                        pass
+                    try:
+                        os.unlink(fname)
+                        if lang == 'cpp' and os.path.exists(fname + '.out'):
+                            os.unlink(fname + '.out')
+                    except Exception:
+                        pass
 
-                        now = time.time()
-                        # Flush every 40ms or when buffer exceeds ~16KB
-                        current_len = sum(len(b) for b in buffer)
-                        if buffer and (now - last_flush > 0.04 or current_len > 16384):
-                            socketio.emit('terminal_data', {'data': "".join(buffer)}, room=target_sid)
-                            buffer.clear()
-                            last_flush = now
+                threading.Thread(target=read_output_pty, daemon=True).start()
+            else:
+                # Fallback for Windows or non-PTY environments
+                process = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    env=safe_env,
+                    text=True,
+                    bufsize=1
+                )
+                room['process'] = process
 
-                        if process.poll() is not None and not r:
-                            break
-                except Exception:
-                    pass
+                def read_output_pipe():
+                    try:
+                        for line in process.stdout:
+                            socketio.emit('terminal_data', {'data': line}, room=target_sid)
+                    except Exception:
+                        pass
+                    socketio.emit('terminal_data', {'data': "\n\n[Program finished]\n"}, room=target_sid)
+                    try:
+                        os.unlink(fname)
+                        if lang == 'cpp' and os.path.exists(fname + '.out'):
+                            os.unlink(fname + '.out')
+                    except Exception:
+                        pass
 
-                # Final flush
-                if buffer:
-                    socketio.emit('terminal_data', {'data': "".join(buffer)}, room=target_sid)
-
-                socketio.emit('terminal_data', {'data': "\n\n[Program finished]\n"}, room=target_sid)
-                
-                try:
-                    os.close(master_fd)
-                except Exception:
-                    pass
-                try:
-                    os.unlink(fname)
-                    if lang == 'cpp' and os.path.exists(fname + '.out'):
-                        os.unlink(fname + '.out')
-                except Exception:
-                    pass
-
-            threading.Thread(target=read_output_batched, daemon=True).start()
+                threading.Thread(target=read_output_pipe, daemon=True).start()
 
         except Exception as e:
             emit('terminal_data', {'data': f"Execution Error: {str(e)}"}, room=target_sid)
@@ -239,9 +257,15 @@ def handle_stdin(data):
             room = rooms[room_id]
             master_fd = room.get('master_fd')
             proc = room.get('process')
-            if master_fd is not None and proc and proc.poll() is None:
+            if master_fd is not None and HAS_PTY and proc and proc.poll() is None:
                 try:
                     os.write(master_fd, (user_input + '\n').encode('utf-8'))
+                except Exception:
+                    pass
+            elif proc and proc.poll() is None and proc.stdin:
+                try:
+                    proc.stdin.write(user_input + '\n')
+                    proc.stdin.flush()
                 except Exception:
                     pass
 
@@ -249,7 +273,7 @@ HOME_PAGE = """<!DOCTYPE html><html><head><title>Nexus Global Cloud IDE</title><
 <body style="background:#090d16; color:#fff; font-family:'Segoe UI',sans-serif; display:flex; justify-content:center; align-items:center; height:100vh; margin:0;">
     <div style="text-align:center; background:#111827; padding:45px; border-radius:12px; border:1px solid #1f2937;">
         <h1 style="color:#00ffcc;">🌐 Nexus Universal Cloud IDE</h1>
-        <p style="color:#94a3b8; margin-bottom:25px;">Batched Emits & PTY Interactive Terminal Enabled.</p>
+        <p style="color:#94a3b8; margin-bottom:25px;">Robust Execution Engine Enabled.</p>
         <a href="/create"><button style="background:linear-gradient(135deg, #00ffcc, #38bdf8); color:#030712; border:none; padding:14px 28px; font-weight:bold; border-radius:6px; cursor:pointer;">Launch New Room</button></a>
     </div>
 </body></html>"""
@@ -312,8 +336,8 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
         <textarea id="codeEditor" spellcheck="false"></textarea>
         <div class="terminal-pane">
             <div class="terminal-header">
-                <span>📊 Output Console (Type input and press Enter)</span>
-                <span style="color: #4ade80;">● Interactive PTY Active</span>
+                <span>📊 Output Console</span>
+                <span style="color: #4ade80;">● Terminal Active</span>
             </div>
             <textarea id="outputBox" spellcheck="false" placeholder="Console ready... Click 'Run Code' to start execution." onkeydown="handleConsoleKey(event)"></textarea>
         </div>
@@ -376,7 +400,7 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
 
         function runCode() {
             let lang = document.getElementById('langSelect').value;
-            outputBox.value = "Initializing batched pty execution...\n";
+            outputBox.value = "Initializing execution...\n";
             socket.emit('start_interactive_run', { room_id: roomId, language: lang, username: username });
         }
 
@@ -395,28 +419,3 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
                 socket.emit('send_stdin_data', { room_id: roomId, input: userInput });
                 outputBox.value += '\n';
                 outputBox.scrollTop = outputBox.scrollHeight;
-            }
-        }
-
-        function sendAiQuery() {
-            let q = document.getElementById('aiQueryInput').value; if(!q) return;
-            document.getElementById('aiChatBox').innerText += "\\nYou: " + q;
-            socket.emit('ai_chat', { query: q, code: editor.value });
-            document.getElementById('aiQueryInput').value = '';
-        }
-        socket.on('ai_response', (data) => {
-            document.getElementById('aiChatBox').innerText += "\\n" + data.reply;
-            let chatBox = document.getElementById('aiChatBox');
-            chatBox.scrollTop = chatBox.scrollHeight;
-        });
-
-        function triggerAiFix() {
-            socket.emit('ai_fix', { room_id: roomId, username: username });
-        }
-    </script>
-</body></html>
-"""
-
-if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5005))
-    socketio.run(app, host='0.0.0.0', port=port, debug=False, allow_unsafe_werkzeug=True)
