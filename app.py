@@ -365,7 +365,25 @@ ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title
         function initApp() {
             if (!window.io) { showCdnError(); return; }
 
-            const socket = io({ transports: ['websocket', 'polling'], upgrade: true });
+            // Start with polling (works under any WSGI server, incl. a plain
+            // sync gunicorn worker) and upgrade to websocket only if the
+            // server actually supports it. Starting with 'websocket' first
+            // can hang forever with no error under a non-threaded server.
+            const socket = io({ transports: ['polling', 'websocket'], upgrade: true, timeout: 20000 });
+
+            // Safety net: if we're still stuck "connecting" after 20s, show
+            // the same visible error instead of hanging silently forever.
+            const connectWatchdog = setTimeout(() => {
+                if (!socket.connected) {
+                    document.getElementById('userBadge').innerText = "🔴 Could not connect (timeout)";
+                    showCdnError();
+                    document.querySelector('#cdnError').innerHTML =
+                        '⚠️ Connected to the page, but the real-time server never responded. ' +
+                        'This usually means the Render Start Command is wrong for Socket.IO. ' +
+                        '<button onclick="location.reload()">Reload</button>';
+                }
+            }, 20000);
+            socket.on('connect', () => clearTimeout(connectWatchdog));
             const roomId = "{{ room_id }}";
             const editor = document.getElementById('codeEditor');
             const outputBox = document.getElementById('outputBox');
