@@ -383,10 +383,6 @@ ROOM_PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><titl
                 }
             );
         }
-        bootSocketIO();
-    </script>
-
-    <script>
         // Independent of Socket.IO entirely: prove the backend process itself
         // is alive by hitting a plain HTTP route. Shown in the activity log
         // immediately, before any socket connection is attempted.
@@ -538,6 +534,14 @@ ROOM_PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><titl
                 socket.emit('ai_fix', { room_id: roomId, username: username });
             };
         }
+
+        // Called only now, after initApp (defined above, in this same merged
+        // script block) actually exists -- calling it before this point (e.g.
+        // from a separate earlier <script> block) throws ReferenceError, since
+        // function declarations only become available once their own <script>
+        // block has finished executing, and separate <script> tags run in
+        // strict document order.
+        bootSocketIO();
     </script>
 </body></html>
 """
