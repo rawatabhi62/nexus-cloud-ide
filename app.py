@@ -50,13 +50,24 @@ def handle_disconnect():
     with rooms_lock:
         room_id = sid_to_room.pop(request.sid, None)
         if room_id and room_id in rooms:
-            username = rooms[room_id]['members'].pop(request.sid, None)
+            room = rooms[room_id]
+            # A pending (not-yet-approved) visitor disconnecting just drops
+            # their request quietly -- nothing to announce to the room.
+            room.get('pending', {}).pop(request.sid, None)
+
+            username = room['members'].pop(request.sid, None)
+            if room.get('host_sid') == request.sid:
+                # Host left: stop auto-approving as them, and no NEW join
+                # requests can be approved until they (or whoever still has
+                # the host link) reconnects. Existing members are unaffected.
+                room['host_sid'] = None
+
             if username:
-                rooms[room_id]['activity_log'].insert(0, f"🔴 {username} left the room.")
-                if len(rooms[room_id]['activity_log']) > 100:
-                    rooms[room_id]['activity_log'].pop()
-                online_users = list(rooms[room_id]['members'].values())
-                logs = rooms[room_id]['activity_log']
+                room['activity_log'].insert(0, f"🔴 {username} left the room.")
+                if len(room['activity_log']) > 100:
+                    room['activity_log'].pop()
+                online_users = list(room['members'].values())
+                logs = room['activity_log']
                 socketio.emit('presence_update', {'users': online_users}, room=room_id)
                 socketio.emit('sync_logs', {'logs': logs}, room=room_id)
 
@@ -68,6 +79,12 @@ def home():
 def create_room():
     # Cryptographically secure room ID generation
     room_id = secrets.token_urlsafe(8)[:8]
+    # A second, separate secret that proves "this visitor is the person who
+    # created the room". Only the /create response (redirect URL below) ever
+    # carries it, so only the creator's browser has it. Anyone with just the
+    # plain /room/<room_id> link (the one people actually share) does NOT
+    # have this token, and so cannot claim to be the host.
+    host_token = secrets.token_urlsafe(16)
     with rooms_lock:
         rooms[room_id] = {
             'code': "# Welcome to Nexus Global Cloud IDE\nname = input('Enter your name: ')\nprint(f'Hello, {name}!')",
@@ -75,27 +92,68 @@ def create_room():
             'run_lock': threading.Lock(),
             'process': None,
             'master_fd': None,
-            'members': {}   # sid -> username, who's currently connected
+            'members': {},    # sid -> username, approved & currently connected
+            'pending': {},    # sid -> username, waiting for host approval
+            'host_token': host_token,
+            'host_sid': None  # sid of whoever is currently connected AS host
         }
-    return redirect(url_for('join_room_page', room_id=room_id))
+    return redirect(url_for('join_room_page', room_id=room_id, host_token=host_token))
 
 @app.route('/room/<room_id>')
 def join_room_page(room_id):
     with rooms_lock:
         if room_id not in rooms:
             return "Room not found or expired! <a href='/'>Create a new room</a>", 404
-    return render_template_string(ROOM_PAGE, room_id=room_id)
+        real_token = rooms[room_id]['host_token']
+    # Only render the real host_token into the page if the visitor already
+    # supplied the matching one in the URL (i.e. they're the creator, via
+    # the /create redirect). A plain shared /room/<id> link carries no token
+    # at all, so this stays empty for every other joiner -- it is never
+    # guessable from the room_id itself.
+    supplied = request.args.get('host_token', '')
+    host_token_for_page = real_token if supplied and supplied == real_token else ''
+    return render_template_string(ROOM_PAGE, room_id=room_id, host_token=host_token_for_page)
 
 @socketio.on('join_room_socket')
 def handle_join(data):
     room_id = data.get('room_id')
     username = data.get('username', 'Someone')
+    supplied_token = data.get('host_token', '')
+
+    with rooms_lock:
+        if room_id not in rooms:
+            emit('join_rejected', {'reason': 'Room not found or expired.'}, room=request.sid)
+            return
+        room = rooms[room_id]
+        # Backward-compat: rooms created before this feature existed.
+        room.setdefault('members', {})
+        room.setdefault('pending', {})
+        room.setdefault('host_token', None)
+        room.setdefault('host_sid', None)
+
+        is_host = bool(room['host_token']) and supplied_token == room['host_token']
+
+        if not is_host:
+            if room['host_sid'] is None:
+                # No host currently connected to approve anyone -- refuse
+                # rather than let people pile into an unmoderated room.
+                emit('join_rejected', {'reason': 'The room host is not online right now. Try again once they are.'}, room=request.sid)
+                return
+            # Queue them and ask the host to approve, instead of letting
+            # them straight in.
+            room['pending'][request.sid] = username
+            emit('join_pending', {}, room=request.sid)
+            emit('join_request', {'sid': request.sid, 'username': username}, room=room['host_sid'])
+            return
+
+        # Host path: join immediately, no approval needed for themselves.
+        room['host_sid'] = request.sid
+
     join_room(room_id)
     with rooms_lock:
         if room_id in rooms:
-            # Backward-compat: older rooms created before this field existed.
-            rooms[room_id].setdefault('members', {})
-            rooms[room_id]['members'][request.sid] = username
+            room = rooms[room_id]
+            room['members'][request.sid] = username
             sid_to_room[request.sid] = room_id
 
             rooms[room_id]['activity_log'].insert(0, f"🟢 {username} joined the room.")
@@ -114,6 +172,44 @@ def handle_join(data):
             # and the member list + activity log changed.
             emit('presence_update', {'users': online_users}, room=room_id, include_self=False)
             emit('sync_logs', {'logs': logs}, room=room_id, include_self=False)
+
+@socketio.on('respond_join_request')
+def handle_respond_join_request(data):
+    room_id = data.get('room_id')
+    target_sid = data.get('sid')
+    approve = bool(data.get('approve'))
+
+    with rooms_lock:
+        if room_id not in rooms:
+            return
+        room = rooms[room_id]
+        # Only the currently-connected host may approve/deny -- never trust
+        # the "approve" click itself, verify the clicker really is host_sid.
+        if request.sid != room.get('host_sid'):
+            return
+        username = room.get('pending', {}).pop(target_sid, None)
+        if username is None:
+            return  # already handled, or they disconnected before a decision
+
+        if not approve:
+            socketio.emit('join_denied', {}, room=target_sid)
+            return
+
+        room['members'][target_sid] = username
+        sid_to_room[target_sid] = room_id
+        room['activity_log'].insert(0, f"🟢 {username} joined the room.")
+        if len(room['activity_log']) > 100:
+            room['activity_log'].pop()
+        online_users = list(room['members'].values())
+        logs = room['activity_log']
+        code = room['code']
+
+    join_room(room_id, sid=target_sid)
+    socketio.emit('join_approved', {}, room=target_sid)
+    socketio.emit('sync_code', {'code': code, 'logs': logs}, room=target_sid)
+    socketio.emit('presence_update', {'users': online_users}, room=target_sid)
+    socketio.emit('presence_update', {'users': online_users}, room=room_id, include_self=False)
+    socketio.emit('sync_logs', {'logs': logs}, room=room_id, include_self=False)
 
 @socketio.on('update_code')
 def handle_code(data):
@@ -347,6 +443,15 @@ ROOM_PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><titl
         ⚠️ Could not load the real-time engine (Socket.IO) from any CDN. Check your internet connection or ad/script blocker and reload.
         <button onclick="location.reload()">Reload</button>
     </div>
+    <div id="waitingOverlay" style="display:none; position:fixed; inset:0; background:rgba(3,7,18,0.95); z-index:9998; color:#00ffcc; flex-direction:column; align-items:center; justify-content:center; font-family:'Courier New',monospace; text-align:center; padding:20px;">
+        <div id="waitingTitle" style="font-size:18px; margin-bottom:10px;">⏳ Waiting for the host to let you in...</div>
+        <div id="waitingSub" style="font-size:13px; color:#94a3b8;">Ask them to approve your join request.</div>
+    </div>
+    <div id="joinRequestBanner" style="display:none; position:fixed; top:0; left:0; right:0; background:#1e1b4b; border-bottom:1px solid #4338ca; color:#c7d2fe; padding:10px 16px; font-size:13px; z-index:9999; text-align:center;">
+        <span id="joinRequestText"></span>
+        <button id="joinApproveBtn" style="background:#10b981; color:#fff; margin-left:10px;">✅ Allow</button>
+        <button id="joinDenyBtn" style="background:#ef4444; color:#fff; margin-left:6px;">❌ Deny</button>
+    </div>
     <div class="sidebar">
         <h3 style="color: #00ffcc; margin-top:0;">🌐 Room: {{ room_id }}</h3>
         <p style="font-size: 12px; color: #94a3b8; margin: 5px 0;">Developer Handle:</p>
@@ -477,6 +582,10 @@ ROOM_PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><titl
                 console.error("Socket connect_error:", err);
             });
             const roomId = "{{ room_id }}";
+            // Only non-empty in the creator's own browser (see /room/<id>
+            // route): proves to the server "I am the host" without the
+            // room_id itself (which everyone has) being enough on its own.
+            const hostToken = "{{ host_token }}";
             const editor = document.getElementById('codeEditor');
             const outputBox = document.getElementById('outputBox');
 
@@ -499,7 +608,7 @@ ROOM_PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><titl
                 ['btnSave', 'btnDownload', 'btnAiSend', 'btnAiFix', 'btnRun'].forEach(id => {
                     document.getElementById(id).disabled = false;
                 });
-                socket.emit('join_room_socket', { room_id: roomId, username: username });
+                socket.emit('join_room_socket', { room_id: roomId, username: username, host_token: hostToken });
             });
 
             socket.on('disconnect', () => {
@@ -538,6 +647,59 @@ ROOM_PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><titl
                 box.innerHTML = users.length
                     ? users.map(u => `<div>🟢 ${escapeHtml(u)}</div>`).join('')
                     : '<div style="color:#64748b;">No one else yet</div>';
+            });
+
+            // --- Host-approval flow -------------------------------------
+            // Non-host visitors get told to wait right away, before any
+            // code/output reaches them, so a stranger with just the link
+            // can't see or touch the room until the host lets them in.
+            const waitingOverlay = document.getElementById('waitingOverlay');
+
+            socket.on('join_pending', () => {
+                waitingOverlay.style.display = 'flex';
+            });
+
+            socket.on('join_approved', () => {
+                waitingOverlay.style.display = 'none';
+            });
+
+            socket.on('join_denied', () => {
+                document.getElementById('waitingTitle').innerText = '🚫 The host denied your request to join.';
+                document.getElementById('waitingSub').innerText = 'You can close this tab, or ask the host to invite you again.';
+                waitingOverlay.style.display = 'flex';
+            });
+
+            socket.on('join_rejected', (data) => {
+                document.getElementById('waitingTitle').innerText = '🚫 Could not join this room.';
+                document.getElementById('waitingSub').innerText = (data && data.reason) ? data.reason : '';
+                waitingOverlay.style.display = 'flex';
+            });
+
+            // Only the host ever receives this event (the server only sends
+            // it to room.host_sid), so only the host ever sees the banner.
+            socket.on('join_request', (data) => {
+                const banner = document.getElementById('joinRequestBanner');
+                document.getElementById('joinRequestText').innerText =
+                    `👋 ${data.username} wants to join this room.`;
+                banner.style.display = 'block';
+
+                const approveBtn = document.getElementById('joinApproveBtn');
+                const denyBtn = document.getElementById('joinDenyBtn');
+                // Replace with clones to drop any previous request's
+                // listeners, in case several join requests arrive in a row.
+                const newApprove = approveBtn.cloneNode(true);
+                const newDeny = denyBtn.cloneNode(true);
+                approveBtn.replaceWith(newApprove);
+                denyBtn.replaceWith(newDeny);
+
+                newApprove.onclick = () => {
+                    socket.emit('respond_join_request', { room_id: roomId, sid: data.sid, approve: true });
+                    banner.style.display = 'none';
+                };
+                newDeny.onclick = () => {
+                    socket.emit('respond_join_request', { room_id: roomId, sid: data.sid, approve: false });
+                    banner.style.display = 'none';
+                };
             });
 
             function updateLogs(logs) {
