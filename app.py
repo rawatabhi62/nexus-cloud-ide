@@ -21,6 +21,10 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', logge
 
 rooms = {}
 rooms_lock = threading.Lock()
+# Maps a live socket connection's sid -> which room it joined, so that on
+# disconnect (which only gives us a sid, not the room) we can still find the
+# right room to remove the member from and announce they left.
+sid_to_room = {}
 
 import datetime
 
@@ -43,6 +47,18 @@ def handle_connect():
 @socketio.on('disconnect')
 def handle_disconnect():
     print(f"[socket] client disconnected sid={request.sid}", flush=True)
+    with rooms_lock:
+        room_id = sid_to_room.pop(request.sid, None)
+        if room_id and room_id in rooms:
+            username = rooms[room_id]['members'].pop(request.sid, None)
+            if username:
+                rooms[room_id]['activity_log'].insert(0, f"🔴 {username} left the room.")
+                if len(rooms[room_id]['activity_log']) > 100:
+                    rooms[room_id]['activity_log'].pop()
+                online_users = list(rooms[room_id]['members'].values())
+                logs = rooms[room_id]['activity_log']
+                socketio.emit('presence_update', {'users': online_users}, room=room_id)
+                socketio.emit('sync_logs', {'logs': logs}, room=room_id)
 
 @app.route('/')
 def home():
@@ -58,7 +74,8 @@ def create_room():
             'activity_log': ["🛡️ Room initialized securely."],
             'run_lock': threading.Lock(),
             'process': None,
-            'master_fd': None
+            'master_fd': None,
+            'members': {}   # sid -> username, who's currently connected
         }
     return redirect(url_for('join_room_page', room_id=room_id))
 
@@ -72,10 +89,31 @@ def join_room_page(room_id):
 @socketio.on('join_room_socket')
 def handle_join(data):
     room_id = data.get('room_id')
+    username = data.get('username', 'Someone')
     join_room(room_id)
     with rooms_lock:
         if room_id in rooms:
-            emit('sync_code', {'code': rooms[room_id]['code'], 'logs': rooms[room_id]['activity_log']}, room=request.sid)
+            # Backward-compat: older rooms created before this field existed.
+            rooms[room_id].setdefault('members', {})
+            rooms[room_id]['members'][request.sid] = username
+            sid_to_room[request.sid] = room_id
+
+            rooms[room_id]['activity_log'].insert(0, f"🟢 {username} joined the room.")
+            if len(rooms[room_id]['activity_log']) > 100:
+                rooms[room_id]['activity_log'].pop()
+
+            online_users = list(rooms[room_id]['members'].values())
+            logs = rooms[room_id]['activity_log']
+            code = rooms[room_id]['code']
+
+            # Full state, including the current online-users list, to the
+            # person who just joined.
+            emit('sync_code', {'code': code, 'logs': logs}, room=request.sid)
+            emit('presence_update', {'users': online_users}, room=request.sid)
+            # Tell everyone ELSE already in the room that this person joined
+            # and the member list + activity log changed.
+            emit('presence_update', {'users': online_users}, room=room_id, include_self=False)
+            emit('sync_logs', {'logs': logs}, room=room_id, include_self=False)
 
 @socketio.on('update_code')
 def handle_code(data):
@@ -319,6 +357,9 @@ ROOM_PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><titl
             <button id="btnDownload" onclick="downloadCode()" style="flex:1; background:#3b82f6; color:#fff;" disabled>📥 Download</button>
         </div>
 
+        <p style="font-size: 12px; color: #94a3b8; margin: 10px 0 5px 0;">👥 Online Now (<span id="onlineCount">0</span>):</p>
+        <div id="onlineUsers" class="log-panel" style="height: 70px;">Connecting...</div>
+
         <div class="ai-panel">
             <b>🤖 AI Copilot Assistant</b>
             <div id="aiChatBox" class="ai-chat-box">Ask AI: 'explain', 'optimize', or 'find bugs'...</div>
@@ -458,7 +499,7 @@ ROOM_PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><titl
                 ['btnSave', 'btnDownload', 'btnAiSend', 'btnAiFix', 'btnRun'].forEach(id => {
                     document.getElementById(id).disabled = false;
                 });
-                socket.emit('join_room_socket', { room_id: roomId });
+                socket.emit('join_room_socket', { room_id: roomId, username: username });
             });
 
             socket.on('disconnect', () => {
@@ -476,9 +517,32 @@ ROOM_PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><titl
                 if (data.logs) updateLogs(data.logs);
             });
 
+            // Usernames are free text the user typed (via the Developer
+            // Handle prompt) and get broadcast to everyone in the room, so
+            // they must be HTML-escaped before going into innerHTML --
+            // otherwise someone could set their "name" to a <script>/<img
+            // onerror> payload and run it in every other member's browser.
+            function escapeHtml(s) {
+                const d = document.createElement('div');
+                d.innerText = String(s);
+                return d.innerHTML;
+            }
+
+            // Broadcast by the server to everyone in the room whenever
+            // someone joins or disconnects, so this list always reflects
+            // who is actually here right now.
+            socket.on('presence_update', (data) => {
+                const users = (data && data.users) ? data.users : [];
+                document.getElementById('onlineCount').innerText = users.length;
+                const box = document.getElementById('onlineUsers');
+                box.innerHTML = users.length
+                    ? users.map(u => `<div>🟢 ${escapeHtml(u)}</div>`).join('')
+                    : '<div style="color:#64748b;">No one else yet</div>';
+            });
+
             function updateLogs(logs) {
                 let lBox = document.getElementById('activityLog');
-                lBox.innerHTML = logs.map(l => `<div>• ${l}</div>`).join('');
+                lBox.innerHTML = logs.map(l => `<div>• ${escapeHtml(l)}</div>`).join('');
             }
 
             let isRemote = false;
