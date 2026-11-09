@@ -270,7 +270,7 @@ def handle_stdin(data):
                 except Exception:
                     pass
 
-HOME_PAGE = """<!DOCTYPE html><html><head><title>Nexus Global Cloud IDE</title></head>
+HOME_PAGE = r"""<!DOCTYPE html><html><head><title>Nexus Global Cloud IDE</title></head>
 <body style="background:#090d16; color:#fff; font-family:'Segoe UI',sans-serif; display:flex; justify-content:center; align-items:center; height:100vh; margin:0;">
     <div style="text-align:center; background:#111827; padding:45px; border-radius:12px; border:1px solid #1f2937;">
         <h1 style="color:#00ffcc;">🌐 Nexus Universal Cloud IDE</h1>
@@ -279,7 +279,7 @@ HOME_PAGE = """<!DOCTYPE html><html><head><title>Nexus Global Cloud IDE</title><
     </div>
 </body></html>"""
 
-ROOM_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>Nexus Room - {{ room_id }}</title>
+ROOM_PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>Nexus Room - {{ room_id }}</title>
 <style>
     body { margin: 0; background: #0b0f19; color: #00ffcc; font-family: 'Courier New', monospace; display: flex; height: 100vh; overflow: hidden; }
     .sidebar { width: 320px; background: #111827; border-right: 1px solid #1f2937; display: flex; flex-direction: column; padding: 15px; overflow-y: auto; box-sizing: border-box; }
