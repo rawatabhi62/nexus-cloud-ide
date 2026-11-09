@@ -137,6 +137,11 @@ def handle_ai_fix(data):
 def handle_start_run(data):
     room_id = data.get('room_id')
     lang = data.get('language', 'python')
+    runner_name = data.get('username', 'Someone')
+
+    # Tell every member of the room (not just whoever clicked Run) to clear
+    # their output console, so everyone sees the same run from the start.
+    socketio.emit('terminal_clear', {'started_by': runner_name}, room=room_id)
 
     with rooms_lock:
         if room_id not in rooms:
@@ -151,7 +156,6 @@ def handle_start_run(data):
         fname = f.name
 
     cmd = [sys.executable, '-u', fname] if lang == 'python' else ['node', fname] if lang == 'javascript' else ['g++', fname, '-o', fname + '.out']
-    target_sid = request.sid
 
     with run_lock:
         # Kill any existing running process in this room safely
@@ -171,7 +175,7 @@ def handle_start_run(data):
             if lang == 'cpp':
                 comp = subprocess.run(cmd, capture_output=True, text=True)
                 if comp.returncode != 0:
-                    emit('terminal_data', {'data': f"C++ Compilation Error:\n{comp.stderr}"}, room=target_sid)
+                    emit('terminal_data', {'data': f"C++ Compilation Error:\n{comp.stderr}"}, room=room_id)
                     os.unlink(fname)
                     if os.path.exists(fname + '.out'):
                         os.unlink(fname + '.out')
@@ -224,7 +228,7 @@ def handle_start_run(data):
                         # Flush every 40ms or when buffer exceeds ~16KB
                         current_len = sum(len(b) for b in buffer)
                         if buffer and (now - last_flush > 0.04 or current_len > 16384):
-                            socketio.emit('terminal_data', {'data': "".join(buffer)}, room=target_sid)
+                            socketio.emit('terminal_data', {'data': "".join(buffer)}, room=room_id)
                             buffer.clear()
                             last_flush = now
 
@@ -235,9 +239,9 @@ def handle_start_run(data):
 
                 # Final flush
                 if buffer:
-                    socketio.emit('terminal_data', {'data': "".join(buffer)}, room=target_sid)
+                    socketio.emit('terminal_data', {'data': "".join(buffer)}, room=room_id)
 
-                socketio.emit('terminal_data', {'data': "\n\n[Program finished]\n"}, room=target_sid)
+                socketio.emit('terminal_data', {'data': "\n\n[Program finished]\n"}, room=room_id)
 
                 try:
                     os.close(master_fd)
@@ -253,7 +257,7 @@ def handle_start_run(data):
             threading.Thread(target=read_output_batched, daemon=True).start()
 
         except Exception as e:
-            emit('terminal_data', {'data': f"Execution Error: {str(e)}"}, room=target_sid)
+            emit('terminal_data', {'data': f"Execution Error: {str(e)}"}, room=room_id)
 
 @socketio.on('send_stdin_data')
 def handle_stdin(data):
@@ -502,9 +506,16 @@ ROOM_PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><titl
 
             window.runCode = function () {
                 let lang = document.getElementById('langSelect').value;
-                outputBox.value = "Initializing batched pty execution...\n";
                 socket.emit('start_interactive_run', { room_id: roomId, language: lang, username: username });
             };
+
+            // Server broadcasts this to everyone in the room (not just whoever
+            // clicked Run), so all members' consoles reset together and then
+            // fill with the same shared output as it streams in.
+            socket.on('terminal_clear', (data) => {
+                const by = (data && data.started_by) ? data.started_by : 'someone';
+                outputBox.value = `Initializing batched pty execution... (started by ${by})\n`;
+            });
 
             socket.on('terminal_data', (data) => {
                 outputBox.value += data.data;
