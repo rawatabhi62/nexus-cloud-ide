@@ -402,7 +402,13 @@ ROOM_PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><titl
             // sync gunicorn worker) and upgrade to websocket only if the
             // server actually supports it. Starting with 'websocket' first
             // can hang forever with no error under a non-threaded server.
-            const socket = io({ transports: ['polling', 'websocket'], upgrade: true, timeout: 20000 });
+            // WebSocket upgrade succeeds at the HTTP level (101 Switching
+            // Protocols) on Render, but the dev-mode WSGI server used here
+            // (allow_unsafe_werkzeug=True) does not reliably service the raw
+            // socket afterwards, so the Socket.IO-level "connect" event never
+            // fires and the client hangs. Staying on polling-only avoids that
+            // broken code path entirely; polling works reliably end-to-end.
+            const socket = io({ transports: ['polling'], upgrade: false, timeout: 20000 });
 
             function showRealError(msg) {
                 document.getElementById('userBadge').innerText = "🔴 Could not connect";
