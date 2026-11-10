@@ -292,11 +292,35 @@ def handle_start_run(data):
     cmd = [sys.executable, '-u', fname] if lang == 'python' else ['node', fname] if lang == 'javascript' else ['g++', fname, '-o', fname + '.out']
 
     with run_lock:
-        # Kill any existing running process in this room safely
+        # Stop any previous run in this room CLEANLY and wait for its
+        # background reader thread to fully exit before touching any new
+        # fd/process. Previously this only terminated the old process and
+        # closed its fd without waiting -- that old reader thread could
+        # still be mid os.read() on that exact fd number when a new run
+        # opened a fresh pty and Linux immediately reused the same fd
+        # number for it, corrupting/crossing the two runs' output and
+        # surfacing as "[Errno 9] Bad file descriptor". Joining the thread
+        # first removes that race entirely: nothing touches the old fd
+        # after this point.
         old_proc = room.get('process')
+        old_thread = room.get('reader_thread')
+        old_stop_event = room.get('stop_event')
+        if old_stop_event:
+            old_stop_event.set()
         if old_proc and old_proc.poll() is None:
             try:
                 old_proc.terminate()
+            except Exception:
+                pass
+        if old_thread and old_thread.is_alive():
+            old_thread.join(timeout=3)
+        if old_proc and old_proc.poll() is None:
+            # terminate() (SIGTERM) above may not have been enough within
+            # the join wait -- make sure it's actually gone before we move
+            # on, so it can't keep writing into a fd we're about to reuse.
+            try:
+                old_proc.kill()
+                old_proc.wait(timeout=1)
             except Exception:
                 pass
         if room.get('master_fd') is not None:
@@ -304,6 +328,7 @@ def handle_start_run(data):
                 os.close(room['master_fd'])
             except Exception:
                 pass
+            room['master_fd'] = None
 
         try:
             if lang == 'cpp':
@@ -337,8 +362,10 @@ def handle_start_run(data):
             )
             os.close(slave_fd)
 
+            stop_event = threading.Event()
             room['process'] = process
             room['master_fd'] = master_fd
+            room['stop_event'] = stop_event
 
             def read_output_batched():
                 decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
@@ -347,6 +374,8 @@ def handle_start_run(data):
 
                 try:
                     while True:
+                        if stop_event.is_set():
+                            break
                         r, _, _ = select.select([master_fd], [], [], 0.1)
                         if r:
                             try:
@@ -371,11 +400,14 @@ def handle_start_run(data):
                 except Exception:
                     pass
 
-                # Final flush
-                if buffer:
-                    socketio.emit('terminal_data', {'data': "".join(buffer)}, room=room_id)
-
-                socketio.emit('terminal_data', {'data': "\n\n[Program finished]\n"}, room=room_id)
+                # If stop_event is set, this run was superseded by a newer
+                # one (someone clicked Run Code again) rather than finishing
+                # naturally -- stay silent instead of racing the new run's
+                # own output/clear with a stale "[Program finished]".
+                if not stop_event.is_set():
+                    if buffer:
+                        socketio.emit('terminal_data', {'data': "".join(buffer)}, room=room_id)
+                    socketio.emit('terminal_data', {'data': "\n\n[Program finished]\n"}, room=room_id)
 
                 try:
                     os.close(master_fd)
@@ -388,7 +420,9 @@ def handle_start_run(data):
                 except Exception:
                     pass
 
-            threading.Thread(target=read_output_batched, daemon=True).start()
+            reader_thread = threading.Thread(target=read_output_batched, daemon=True)
+            room['reader_thread'] = reader_thread
+            reader_thread.start()
 
         except Exception as e:
             emit('terminal_data', {'data': f"Execution Error: {str(e)}"}, room=room_id)
@@ -586,6 +620,17 @@ ROOM_PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><titl
             // route): proves to the server "I am the host" without the
             // room_id itself (which everyone has) being enough on its own.
             const hostToken = "{{ host_token }}";
+            // The host link looks like /room/<id>?host_token=... right after
+            // "Create Room" -- if the host copies the address bar (the
+            // single most natural way anyone shares "the room link"), that
+            // query string goes with it and whoever opens it is treated as
+            // host too, no approval needed. Scrub it from the visible URL
+            // immediately so only /room/<id> (no token) is ever what gets
+            // copied from here on; hostToken above already captured the
+            // real value before this runs.
+            if (hostToken && window.history && window.history.replaceState) {
+                window.history.replaceState(null, '', '/room/' + roomId);
+            }
             const editor = document.getElementById('codeEditor');
             const outputBox = document.getElementById('outputBox');
 
