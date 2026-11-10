@@ -9,6 +9,8 @@ import select
 import pty
 import codecs
 import time
+import ast
+import re
 from flask import Flask, render_template_string, request, redirect, url_for
 from flask_socketio import SocketIO, emit, join_room
 
@@ -45,6 +47,109 @@ def _append_history(room, entry):
     if len(hist) > MAX_HISTORY:
         del hist[0:len(hist) - MAX_HISTORY]
     return entry
+
+# Seconds of typing inactivity to wait for before actually running a syntax
+# check, so a live checker doesn't spawn a compiler/interpreter process on
+# every single keystroke -- only once the room has paused for a moment.
+SYNTAX_DEBOUNCE_SECONDS = 0.8
+
+def check_syntax(code, lang):
+    """Real, best-effort syntax check for the given language -- never a
+    guess: Python goes through the real ast parser, C++ through a real
+    `g++ -fsyntax-only` pass, and JavaScript through a real `node --check`
+    pass (the exact same tools this app already uses to compile/run code).
+    Returns {'status': 'ok'|'error'|'unavailable', 'message': str, 'line': int|None}.
+    """
+    if not code or not code.strip():
+        return {'status': 'ok', 'message': 'Empty file.', 'line': None}
+
+    if lang == 'python':
+        try:
+            ast.parse(code)
+            return {'status': 'ok', 'message': 'No syntax errors detected.', 'line': None}
+        except SyntaxError as e:
+            return {'status': 'error', 'message': e.msg or 'Syntax error', 'line': e.lineno}
+        except Exception as e:
+            return {'status': 'unavailable', 'message': str(e), 'line': None}
+
+    if lang in ('cpp', 'javascript'):
+        ext = '.cpp' if lang == 'cpp' else '.js'
+        fname = None
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', suffix=ext, delete=False, encoding='utf-8') as f:
+                f.write(code)
+                fname = f.name
+
+            cmd = ['g++', '-fsyntax-only', fname] if lang == 'cpp' else ['node', '--check', fname]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+
+            if result.returncode == 0:
+                return {'status': 'ok', 'message': 'No syntax errors detected.', 'line': None}
+
+            stderr = result.stderr or ''
+            if lang == 'cpp':
+                # g++ -fsyntax-only error lines look like:
+                #   file.cpp:4:5: error: expected ',' or ';' before 'std'
+                m = re.search(r':(\d+):\d+:\s*error:\s*(.+)', stderr)
+                line = int(m.group(1)) if m else None
+                msg = m.group(2).strip() if m else (
+                    stderr.strip().splitlines()[-1] if stderr.strip() else 'Compilation error.')
+            else:
+                # `node --check` prints "file.js:<line>" on its first line,
+                # then a source snippet/caret, then "SyntaxError: <message>".
+                first_line = stderr.splitlines()[0] if stderr.splitlines() else ''
+                line_m = re.search(r':(\d+)\s*$', first_line)
+                line = int(line_m.group(1)) if line_m else None
+                msg_m = re.search(r'^(?:Syntax|Reference|Type)Error:\s*(.+)$', stderr, re.M)
+                msg = msg_m.group(1).strip() if msg_m else (
+                    stderr.strip().splitlines()[-1] if stderr.strip() else 'Syntax error.')
+            return {'status': 'error', 'message': msg, 'line': line}
+        except subprocess.TimeoutExpired:
+            return {'status': 'unavailable', 'message': 'Syntax check timed out.', 'line': None}
+        except FileNotFoundError:
+            tool = 'g++' if lang == 'cpp' else 'node'
+            return {'status': 'unavailable', 'message': f'{tool} is not available on the server.', 'line': None}
+        except Exception as e:
+            return {'status': 'unavailable', 'message': str(e), 'line': None}
+        finally:
+            if fname:
+                try:
+                    os.unlink(fname)
+                except Exception:
+                    pass
+
+    return {'status': 'unavailable', 'message': 'Unknown language.', 'line': None}
+
+def _run_syntax_check(room_id):
+    """Timer callback (runs in its own thread, SYNTAX_DEBOUNCE_SECONDS after
+    the last edit that didn't get superseded by a newer one): read the
+    room's current code/language and broadcast a real syntax_status to
+    everyone in the room."""
+    with rooms_lock:
+        if room_id not in rooms:
+            return
+        room = rooms[room_id]
+        code = room.get('code', '')
+        lang = room.get('language', 'python')
+    result = check_syntax(code, lang)
+    socketio.emit('syntax_status', result, room=room_id)
+
+def _schedule_syntax_check(room_id):
+    """Debounce: cancel whichever syntax-check timer this room already had
+    pending (if the previous edit's check hasn't fired yet) and schedule a
+    fresh one. Never called while already holding rooms_lock -- it takes
+    the lock itself."""
+    with rooms_lock:
+        if room_id not in rooms:
+            return
+        room = rooms[room_id]
+        old_timer = room.get('syntax_timer')
+        if old_timer is not None:
+            old_timer.cancel()
+        timer = threading.Timer(SYNTAX_DEBOUNCE_SECONDS, _run_syntax_check, args=(room_id,))
+        timer.daemon = True
+        room['syntax_timer'] = timer
+        timer.start()
 
 import datetime
 
@@ -123,7 +228,12 @@ def create_room():
             # seeing the latest state. Edit snapshots are throttled (not one
             # per keystroke) to keep this list small and cheap on the free tier.
             'history': [],
-            'last_snapshot_time': 0
+            'last_snapshot_time': 0,
+            # Last language selected by anyone in the room, kept server-side
+            # so the live syntax checker knows which compiler/parser to run
+            # even though the dropdown itself lives only in each browser.
+            'language': 'python',
+            'syntax_timer': None
         }
     return redirect(url_for('join_room_page', room_id=room_id, host_token=host_token))
 
@@ -160,6 +270,8 @@ def handle_join(data):
         room.setdefault('host_sid', None)
         room.setdefault('history', [])
         room.setdefault('last_snapshot_time', 0)
+        room.setdefault('language', 'python')
+        room.setdefault('syntax_timer', None)
 
         is_host = bool(room['host_token']) and supplied_token == room['host_token']
 
@@ -202,6 +314,9 @@ def handle_join(data):
             # and the member list + activity log changed.
             emit('presence_update', {'users': online_users}, room=room_id, include_self=False)
             emit('sync_logs', {'logs': logs}, room=room_id, include_self=False)
+    # So whoever just joined sees the current syntax status immediately,
+    # instead of waiting for someone else to type.
+    _schedule_syntax_check(room_id)
 
 @socketio.on('respond_join_request')
 def handle_respond_join_request(data):
@@ -240,21 +355,26 @@ def handle_respond_join_request(data):
     socketio.emit('presence_update', {'users': online_users}, room=target_sid)
     socketio.emit('presence_update', {'users': online_users}, room=room_id, include_self=False)
     socketio.emit('sync_logs', {'logs': logs}, room=room_id, include_self=False)
+    _schedule_syntax_check(room_id)
 
 @socketio.on('update_code')
 def handle_code(data):
     room_id = data.get('room_id')
     code = data.get('code')
     username = data.get('username', 'Someone')
+    language = data.get('language')
     new_entry = None
     with rooms_lock:
         if room_id in rooms:
             room = rooms[room_id]
+            code_changed = room.get('code') != code
             room['code'] = code
+            if language:
+                room['language'] = language
             emit('sync_code', {'code': code}, room=room_id, include_self=False)
 
             now = time.time()
-            if now - room.get('last_snapshot_time', 0) >= EDIT_SNAPSHOT_COOLDOWN:
+            if code_changed and now - room.get('last_snapshot_time', 0) >= EDIT_SNAPSHOT_COOLDOWN:
                 room['last_snapshot_time'] = now
                 new_entry = _append_history(room, {
                     't': now, 'type': 'edit', 'user': username, 'code': code
@@ -263,6 +383,9 @@ def handle_code(data):
     # room grow live, instead of only backfilling when someone opens it.
     if new_entry is not None:
         socketio.emit('history_append', new_entry, room=room_id)
+    # Live syntax checker: debounced, so a real compiler/parser pass only
+    # runs once typing in the room actually pauses, not on every keystroke.
+    _schedule_syntax_check(room_id)
 
 @socketio.on('save_cloud')
 def handle_save(data):
@@ -658,6 +781,7 @@ ROOM_PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><titl
             </div>
             <button id="btnRun" onclick="runCode()" disabled>▶ Run Code</button>
         </div>
+        <div id="syntaxBar" style="padding:6px 20px; font-size:12px; background:#1f2937; color:#94a3b8; flex-shrink:0; box-sizing:border-box; border-bottom:1px solid #111827;">⚪ Live syntax check will appear here as you type...</div>
         <textarea id="codeEditor" spellcheck="false"></textarea>
         <div class="terminal-pane">
             <div class="terminal-header">
@@ -889,7 +1013,50 @@ ROOM_PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><titl
             let isRemote = false;
             editor.addEventListener('input', () => {
                 if (isRemote) return;
-                socket.emit('update_code', { room_id: roomId, code: editor.value, username: username });
+                socket.emit('update_code', {
+                    room_id: roomId, code: editor.value, username: username,
+                    language: document.getElementById('langSelect').value
+                });
+            });
+
+            // --- Live Multi-Language Syntax Checker -----------------------
+            // The server runs a REAL check in the background (Python's ast
+            // parser, a real `g++ -fsyntax-only` pass, or a real
+            // `node --check` pass) a moment after typing pauses, and
+            // broadcasts the result to everyone in the room -- something
+            // free online compilers don't offer while collaborating live.
+            const syntaxBar = document.getElementById('syntaxBar');
+            function updateSyntaxBar(data) {
+                if (!data) return;
+                if (data.status === 'ok') {
+                    syntaxBar.style.background = '#064e3b';
+                    syntaxBar.style.color = '#4ade80';
+                    syntaxBar.innerText = '🟢 ' + (data.message || 'No syntax errors detected.');
+                } else if (data.status === 'error') {
+                    syntaxBar.style.background = '#7f1d1d';
+                    syntaxBar.style.color = '#fecaca';
+                    syntaxBar.innerText = '🔴 ' + (data.line ? ('Line ' + data.line + ': ') : '') + data.message;
+                } else {
+                    syntaxBar.style.background = '#334155';
+                    syntaxBar.style.color = '#cbd5e1';
+                    syntaxBar.innerText = '⚪ ' + (data.message || 'Syntax check unavailable right now.');
+                }
+            }
+            socket.on('syntax_status', (data) => updateSyntaxBar(data));
+
+            // Changing the language doesn't change the code, so this
+            // wouldn't by itself trigger a re-check -- re-send the current
+            // code tagged with the new language so the server re-verifies
+            // against the right toolchain (no duplicate Time Machine entry
+            // gets recorded for this, since the code itself is unchanged).
+            document.getElementById('langSelect').addEventListener('change', () => {
+                syntaxBar.style.background = '#1f2937';
+                syntaxBar.style.color = '#94a3b8';
+                syntaxBar.innerText = '⏳ Re-checking syntax for the new language...';
+                socket.emit('update_code', {
+                    room_id: roomId, code: editor.value, username: username,
+                    language: document.getElementById('langSelect').value
+                });
             });
 
             // --- Time Machine (session replay) ---------------------------
