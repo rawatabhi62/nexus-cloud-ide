@@ -26,6 +26,26 @@ rooms_lock = threading.Lock()
 # right room to remove the member from and announce they left.
 sid_to_room = {}
 
+# How many Time Machine snapshots (edits + runs, combined) each room keeps in
+# memory. Old snapshots are dropped once a room exceeds this, so a long-lived
+# room on the free tier can't grow its history unboundedly.
+MAX_HISTORY = 300
+# Minimum seconds between two consecutive "edit" snapshots for the same
+# room. Recording one per keystroke would flood the history (and memory)
+# with near-duplicate states, so edits are sampled on a cooldown instead;
+# "run" snapshots are never throttled -- every run is always recorded.
+EDIT_SNAPSHOT_COOLDOWN = 4
+
+def _append_history(room, entry):
+    """Append a Time Machine snapshot to room['history'], trimmed to
+    MAX_HISTORY entries. Caller must already hold rooms_lock. Returns the
+    entry so the caller can broadcast it once, outside the lock."""
+    hist = room.setdefault('history', [])
+    hist.append(entry)
+    if len(hist) > MAX_HISTORY:
+        del hist[0:len(hist) - MAX_HISTORY]
+    return entry
+
 import datetime
 
 @app.route('/health')
@@ -95,7 +115,15 @@ def create_room():
             'members': {},    # sid -> username, approved & currently connected
             'pending': {},    # sid -> username, waiting for host approval
             'host_token': host_token,
-            'host_sid': None  # sid of whoever is currently connected AS host
+            'host_sid': None,  # sid of whoever is currently connected AS host
+            # "Time Machine" session history: a bounded, timestamped list of
+            # {t, type: 'edit'|'run', user, code, [output], [language]}
+            # snapshots, so anyone in the room can scrub back through how the
+            # code evolved (and what each run produced) instead of only ever
+            # seeing the latest state. Edit snapshots are throttled (not one
+            # per keystroke) to keep this list small and cheap on the free tier.
+            'history': [],
+            'last_snapshot_time': 0
         }
     return redirect(url_for('join_room_page', room_id=room_id, host_token=host_token))
 
@@ -130,6 +158,8 @@ def handle_join(data):
         room.setdefault('pending', {})
         room.setdefault('host_token', None)
         room.setdefault('host_sid', None)
+        room.setdefault('history', [])
+        room.setdefault('last_snapshot_time', 0)
 
         is_host = bool(room['host_token']) and supplied_token == room['host_token']
 
@@ -215,10 +245,24 @@ def handle_respond_join_request(data):
 def handle_code(data):
     room_id = data.get('room_id')
     code = data.get('code')
+    username = data.get('username', 'Someone')
+    new_entry = None
     with rooms_lock:
         if room_id in rooms:
-            rooms[room_id]['code'] = code
+            room = rooms[room_id]
+            room['code'] = code
             emit('sync_code', {'code': code}, room=room_id, include_self=False)
+
+            now = time.time()
+            if now - room.get('last_snapshot_time', 0) >= EDIT_SNAPSHOT_COOLDOWN:
+                room['last_snapshot_time'] = now
+                new_entry = _append_history(room, {
+                    't': now, 'type': 'edit', 'user': username, 'code': code
+                })
+    # Broadcast outside the lock: lets every open Time Machine panel in the
+    # room grow live, instead of only backfilling when someone opens it.
+    if new_entry is not None:
+        socketio.emit('history_append', new_entry, room=room_id)
 
 @socketio.on('save_cloud')
 def handle_save(data):
@@ -371,6 +415,14 @@ def handle_start_run(data):
                 decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
                 buffer = []
                 last_flush = time.time()
+                # Separately mirrors everything flushed to the room, capped,
+                # so a completed run can be filed into the Time Machine
+                # history with the real output it produced -- not just the
+                # code that was run. Capped independently of the live
+                # terminal (which gets the full stream) to bound memory.
+                captured = []
+                captured_len = 0
+                CAPTURE_CAP = 6000
 
                 try:
                     while True:
@@ -384,6 +436,9 @@ def handle_start_run(data):
                                     break
                                 decoded = decoder.decode(chunk)
                                 buffer.append(decoded)
+                                if captured_len < CAPTURE_CAP:
+                                    captured.append(decoded)
+                                    captured_len += len(decoded)
                             except OSError:
                                 break
 
@@ -403,11 +458,25 @@ def handle_start_run(data):
                 # If stop_event is set, this run was superseded by a newer
                 # one (someone clicked Run Code again) rather than finishing
                 # naturally -- stay silent instead of racing the new run's
-                # own output/clear with a stale "[Program finished]".
+                # own output/clear with a stale "[Program finished]", and
+                # don't file a history entry for a run that never completed.
                 if not stop_event.is_set():
                     if buffer:
                         socketio.emit('terminal_data', {'data': "".join(buffer)}, room=room_id)
                     socketio.emit('terminal_data', {'data': "\n\n[Program finished]\n"}, room=room_id)
+
+                    output_text = "".join(captured)
+                    if captured_len >= CAPTURE_CAP:
+                        output_text += "\n...[output truncated in Time Machine history]"
+                    new_entry = None
+                    with rooms_lock:
+                        if room_id in rooms:
+                            new_entry = _append_history(rooms[room_id], {
+                                't': time.time(), 'type': 'run', 'user': runner_name,
+                                'language': lang, 'code': code, 'output': output_text
+                            })
+                    if new_entry is not None:
+                        socketio.emit('history_append', new_entry, room=room_id)
 
                 try:
                     os.close(master_fd)
@@ -441,6 +510,44 @@ def handle_stdin(data):
                     os.write(master_fd, (user_input + '\n').encode('utf-8'))
                 except Exception:
                     pass
+
+@socketio.on('get_history')
+def handle_get_history(data):
+    """Time Machine: send the requesting client the room's full recorded
+    history (edit + run snapshots) so it can build the scrub slider. This
+    backfills whoever just opened the panel; 'history_append' (emitted
+    elsewhere) keeps it growing live for as long as it stays open."""
+    room_id = data.get('room_id')
+    with rooms_lock:
+        if room_id not in rooms:
+            emit('history_data', {'history': []}, room=request.sid)
+            return
+        hist = list(rooms[room_id].get('history', []))
+    emit('history_data', {'history': hist}, room=request.sid)
+
+@socketio.on('restore_history_code')
+def handle_restore_history(data):
+    """Time Machine: jump the room's LIVE code back to a past snapshot the
+    requester picked, and sync that to everyone currently in the room --
+    the same trust model as normal editing (anyone in the room can already
+    edit the code at will), just restoring an older version instead of
+    typing it. Logged in the activity feed so it's visible, not silent."""
+    room_id = data.get('room_id')
+    code = data.get('code')
+    username = data.get('username', 'Someone')
+    if code is None:
+        return
+    with rooms_lock:
+        if room_id not in rooms:
+            return
+        room = rooms[room_id]
+        room['code'] = code
+        room['activity_log'].insert(0, f"⏪ {username} restored a snapshot from the Time Machine.")
+        if len(room['activity_log']) > 100:
+            room['activity_log'].pop()
+        logs = room['activity_log']
+    socketio.emit('sync_code', {'code': code, 'logs': logs}, room=room_id)
+    socketio.emit('sync_logs', {'logs': logs}, room=room_id)
 
 HOME_PAGE = r"""<!DOCTYPE html><html><head><title>Nexus Global Cloud IDE</title></head>
 <body style="background:#090d16; color:#fff; font-family:'Segoe UI',sans-serif; display:flex; justify-content:center; align-items:center; height:100vh; margin:0;">
@@ -486,6 +593,32 @@ ROOM_PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><titl
         <button id="joinApproveBtn" style="background:#10b981; color:#fff; margin-left:10px;">✅ Allow</button>
         <button id="joinDenyBtn" style="background:#ef4444; color:#fff; margin-left:6px;">❌ Deny</button>
     </div>
+    <div id="timeMachineModal" style="display:none; position:fixed; inset:0; background:rgba(3,7,18,0.92); z-index:9997; align-items:center; justify-content:center; font-family:'Courier New',monospace;">
+        <div style="background:#0f172a; border:1px solid #a855f7; border-radius:10px; width:min(900px,92vw); max-height:88vh; display:flex; flex-direction:column; padding:18px; box-sizing:border-box;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                <h3 style="margin:0; color:#c084fc;">🕰️ Session Time Machine</h3>
+                <button onclick="closeTimeMachine()" style="background:#ef4444; color:#fff;">✕ Close</button>
+            </div>
+            <div style="font-size:12px; color:#94a3b8; margin-bottom:10px;">Scrub through how this room's code evolved, who changed it, and what each run produced &mdash; something most online compilers never let you see.</div>
+            <div id="tmEmptyMsg" style="color:#64748b; font-size:13px; padding:20px 0;">No snapshots recorded yet &mdash; keep coding or run your program, and this will start filling in live.</div>
+            <div id="tmBody" style="display:none; flex:1; overflow:hidden; flex-direction:column;">
+                <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px;">
+                    <button id="tmPlayBtn" onclick="toggleTimeMachinePlay()" style="background:#a855f7; color:#fff;">▶ Play</button>
+                    <input type="range" id="tmSlider" min="0" max="0" value="0" style="flex:1;" oninput="showSnapshot(parseInt(this.value))">
+                    <span id="tmIndexLabel" style="font-size:11px; color:#94a3b8; min-width:70px; text-align:right;">0 / 0</span>
+                </div>
+                <div id="tmMeta" style="font-size:12px; margin-bottom:6px; color:#e2e8f0;"></div>
+                <div style="flex:1; overflow-y:auto; background:#020617; border:1px solid #1e293b; border-radius:6px; padding:10px; margin-bottom:8px;">
+                    <pre id="tmCode" style="margin:0; color:#38bdf8; font-size:12px; white-space:pre-wrap;"></pre>
+                </div>
+                <div id="tmOutputWrap" style="display:none; max-height:120px; overflow-y:auto; background:#011; border:1px solid #1e293b; border-radius:6px; padding:10px; margin-bottom:8px;">
+                    <div style="color:#94a3b8; font-size:11px; margin-bottom:4px;">📊 Output at this point:</div>
+                    <pre id="tmOutput" style="margin:0; color:#4ade80; font-size:12px; white-space:pre-wrap;"></pre>
+                </div>
+                <button id="tmRestoreBtn" onclick="restoreSnapshot()" style="background:#f59e0b; color:#030712;">⏪ Restore this version into the live editor</button>
+            </div>
+        </div>
+    </div>
     <div class="sidebar">
         <h3 style="color: #00ffcc; margin-top:0;">🌐 Room: {{ room_id }}</h3>
         <p style="font-size: 12px; color: #94a3b8; margin: 5px 0;">Developer Handle:</p>
@@ -495,6 +628,7 @@ ROOM_PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><titl
             <button id="btnSave" onclick="saveCloud()" style="flex:1; background:#10b981; color:#fff;" disabled>💾 Save Cloud</button>
             <button id="btnDownload" onclick="downloadCode()" style="flex:1; background:#3b82f6; color:#fff;" disabled>📥 Download</button>
         </div>
+        <button id="btnTimeMachine" onclick="openTimeMachine()" style="width:100%; margin-top:5px; background:#a855f7; color:#fff;" disabled>🕰️ Time Machine (<span id="historyCount">0</span>)</button>
 
         <p style="font-size: 12px; color: #94a3b8; margin: 10px 0 5px 0;">👥 Online Now (<span id="onlineCount">0</span>):</p>
         <div id="onlineUsers" class="log-panel" style="height: 70px;">Connecting...</div>
@@ -650,7 +784,7 @@ ROOM_PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><titl
                 document.getElementById('ptyStatus').style.color = '#4ade80';
                 document.getElementById('ptyStatus').innerText = '● Interactive PTY Active';
                 outputBox.placeholder = "Console ready... Click 'Run Code' to start execution.";
-                ['btnSave', 'btnDownload', 'btnAiSend', 'btnAiFix', 'btnRun'].forEach(id => {
+                ['btnSave', 'btnDownload', 'btnAiSend', 'btnAiFix', 'btnRun', 'btnTimeMachine'].forEach(id => {
                     document.getElementById(id).disabled = false;
                 });
                 socket.emit('join_room_socket', { room_id: roomId, username: username, host_token: hostToken });
@@ -755,8 +889,125 @@ ROOM_PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><titl
             let isRemote = false;
             editor.addEventListener('input', () => {
                 if (isRemote) return;
-                socket.emit('update_code', { room_id: roomId, code: editor.value });
+                socket.emit('update_code', { room_id: roomId, code: editor.value, username: username });
             });
+
+            // --- Time Machine (session replay) ---------------------------
+            // A per-room, growing timeline of edit + run snapshots recorded
+            // server-side. This is the project's signature feature: unlike
+            // ordinary online compilers that only ever show the latest code,
+            // anyone here can scrub back and watch exactly how the solution
+            // was built, who wrote what, and what each run actually printed.
+            let historyData = [];
+            let tmIndex = 0;
+            let tmPlaying = false;
+            let tmPlayTimer = null;
+
+            function colorForUser(name) {
+                let h = 0;
+                for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) % 360;
+                return `hsl(${h}, 70%, 60%)`;
+            }
+
+            function refreshHistoryButton() {
+                document.getElementById('historyCount').innerText = historyData.length;
+            }
+
+            socket.on('history_data', (data) => {
+                historyData = (data && data.history) ? data.history : [];
+                refreshHistoryButton();
+                renderTimeMachine();
+            });
+
+            socket.on('history_append', (entry) => {
+                historyData.push(entry);
+                refreshHistoryButton();
+                // Only re-render live if the panel is actually open, and
+                // only jump to the newest snapshot if the user was already
+                // looking at the latest one (so scrubbing isn't yanked out
+                // from under someone reviewing an older point).
+                const modal = document.getElementById('timeMachineModal');
+                if (modal.style.display === 'flex') {
+                    const wasAtEnd = tmIndex >= historyData.length - 2;
+                    renderTimeMachine(wasAtEnd ? historyData.length - 1 : tmIndex);
+                }
+            });
+
+            function renderTimeMachine(indexToShow) {
+                const emptyMsg = document.getElementById('tmEmptyMsg');
+                const body = document.getElementById('tmBody');
+                if (!historyData.length) {
+                    emptyMsg.style.display = 'block';
+                    body.style.display = 'none';
+                    return;
+                }
+                emptyMsg.style.display = 'none';
+                body.style.display = 'flex';
+                const slider = document.getElementById('tmSlider');
+                slider.max = historyData.length - 1;
+                const idx = (indexToShow === undefined) ? historyData.length - 1 : indexToShow;
+                slider.value = idx;
+                showSnapshot(idx);
+            }
+
+            window.showSnapshot = function (i) {
+                if (!historyData.length) return;
+                i = Math.max(0, Math.min(i, historyData.length - 1));
+                tmIndex = i;
+                const entry = historyData[i];
+                document.getElementById('tmSlider').value = i;
+                document.getElementById('tmIndexLabel').innerText = `${i + 1} / ${historyData.length}`;
+                document.getElementById('tmCode').innerText = entry.code || '';
+                const when = new Date(entry.t * 1000).toLocaleTimeString();
+                const dot = `<span style="color:${colorForUser(entry.user || 'Someone')};">●</span>`;
+                if (entry.type === 'run') {
+                    document.getElementById('tmMeta').innerHTML =
+                        `${dot} <b>${escapeHtml(entry.user)}</b> ran this code (${escapeHtml(entry.language || '')}) at ${when}`;
+                    document.getElementById('tmOutputWrap').style.display = 'block';
+                    document.getElementById('tmOutput').innerText = entry.output || '(no output)';
+                } else {
+                    document.getElementById('tmMeta').innerHTML =
+                        `${dot} <b>${escapeHtml(entry.user)}</b> edited the code at ${when}`;
+                    document.getElementById('tmOutputWrap').style.display = 'none';
+                }
+            };
+
+            window.openTimeMachine = function () {
+                document.getElementById('timeMachineModal').style.display = 'flex';
+                socket.emit('get_history', { room_id: roomId });
+            };
+
+            window.closeTimeMachine = function () {
+                document.getElementById('timeMachineModal').style.display = 'none';
+                if (tmPlaying) toggleTimeMachinePlay();
+            };
+
+            window.toggleTimeMachinePlay = function () {
+                const btn = document.getElementById('tmPlayBtn');
+                tmPlaying = !tmPlaying;
+                if (tmPlaying) {
+                    btn.innerText = '⏸ Pause';
+                    if (tmIndex >= historyData.length - 1) tmIndex = 0;
+                    tmPlayTimer = setInterval(() => {
+                        if (tmIndex >= historyData.length - 1) {
+                            toggleTimeMachinePlay();
+                            return;
+                        }
+                        showSnapshot(tmIndex + 1);
+                    }, 900);
+                } else {
+                    btn.innerText = '▶ Play';
+                    clearInterval(tmPlayTimer);
+                }
+            };
+
+            window.restoreSnapshot = function () {
+                if (!historyData.length) return;
+                const entry = historyData[tmIndex];
+                if (!confirm('Replace the LIVE code for everyone in this room with this older snapshot?')) return;
+                socket.emit('restore_history_code', { room_id: roomId, code: entry.code, username: username });
+                closeTimeMachine();
+            };
 
             window.saveCloud = function () {
                 socket.emit('save_cloud', { room_id: roomId, username: username });
