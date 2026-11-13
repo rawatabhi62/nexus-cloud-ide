@@ -672,121 +672,171 @@ def handle_restore_history(data):
     socketio.emit('sync_code', {'code': code, 'logs': logs}, room=room_id)
     socketio.emit('sync_logs', {'logs': logs}, room=room_id)
 
-HOME_PAGE = r"""<!DOCTYPE html><html><head><title>Nexus Global Cloud IDE</title></head>
-<body style="background:#090d16; color:#fff; font-family:'Segoe UI',sans-serif; display:flex; justify-content:center; align-items:center; height:100vh; margin:0;">
-    <div style="text-align:center; background:#111827; padding:45px; border-radius:12px; border:1px solid #1f2937;">
-        <h1 style="color:#00ffcc;">🌐 Nexus Universal Cloud IDE</h1>
-        <p style="color:#94a3b8; margin-bottom:25px;">Batched Emits & PTY Interactive Terminal Enabled.</p>
-        <a href="/create"><button style="background:linear-gradient(135deg, #00ffcc, #38bdf8); color:#030712; border:none; padding:14px 28px; font-weight:bold; border-radius:6px; cursor:pointer;">Launch New Room</button></a>
+HOME_PAGE = r"""<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Nexus Global Cloud IDE</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body { margin: 0; background: #12151f; color: #eef1f6; font-family: 'IBM Plex Sans', Arial, sans-serif; display: flex; justify-content: center; align-items: center; overflow: hidden; position: relative; }
+    .glow { position: absolute; width: 640px; height: 640px; border-radius: 50%; background: radial-gradient(circle, rgba(255,157,92,0.16), transparent 70%); pointer-events: none; }
+    .card { position: relative; max-width: 560px; padding: 56px; animation: riseIn .6s ease; }
+    @keyframes riseIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+    .kicker { font-family: 'JetBrains Mono', monospace; font-size: 13px; color: #4fd1c0; letter-spacing: 0.3px; }
+    h1 { font-family: 'Space Grotesk', sans-serif; font-size: 42px; font-weight: 600; line-height: 1.18; margin: 16px 0 18px; color: #eef1f6; max-width: 480px; }
+    p.sub { font-size: 16px; color: #8c93a6; line-height: 1.65; margin: 0 0 34px; max-width: 460px; }
+    .cta { display: inline-flex; align-items: center; gap: 10px; background: #ff9d5c; color: #201207; border: none; padding: 15px 28px; font-weight: 600; font-size: 15px; border-radius: 8px; cursor: pointer; font-family: 'IBM Plex Sans', sans-serif; transition: background-color .15s ease; }
+    .cta:hover { background: #ffb17c; }
+    .meta { margin-top: 30px; display: flex; gap: 20px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #5b6274; }
+    .meta span::before { content: ''; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #4fd1c0; margin-right: 7px; vertical-align: middle; }
+</style></head>
+<body>
+    <div class="glow"></div>
+    <div class="card">
+        <p class="kicker">nexus console</p>
+        <h1>Code together, run together, in one shared room.</h1>
+        <p class="sub">A real-time collaborative compiler for Python, C++ and JavaScript &mdash; live editing, shared execution output, and host-approved access, running entirely in the browser.</p>
+        <a href="/create" style="text-decoration:none;"><button class="cta">Launch a new room</button></a>
+        <div class="meta"><span>Python</span><span>C++</span><span>JavaScript</span></div>
     </div>
 </body></html>"""
 
 ROOM_PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>Nexus Room - {{ room_id }}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap">
 <style>
-    body { margin: 0; background: #0b0f19; color: #00ffcc; font-family: 'Courier New', monospace; display: flex; height: 100vh; overflow: hidden; }
-    .sidebar { width: 320px; background: #111827; border-right: 1px solid #1f2937; display: flex; flex-direction: column; padding: 15px; overflow-y: auto; box-sizing: border-box; }
+    :root {
+        --void: #12151f; --panel: #191d29; --raised: #202534; --line: #2b3146;
+        --ink: #eef1f6; --mist: #8c93a6; --signal: #ff9d5c; --signal-strong: #ffb17c;
+        --beacon: #4fd1c0; --alert: #ef6b6b; --go: #7bd88f;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--void); color: var(--ink); font-family: 'IBM Plex Sans', Arial, sans-serif; display: flex; height: 100vh; overflow: hidden; opacity: 0; }
+    body.ready { animation: riseIn .5s ease forwards; }
+    @keyframes riseIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+    .sidebar { width: 320px; background: var(--panel); border-right: 1px solid var(--line); display: flex; flex-direction: column; padding: 22px 20px; overflow-y: auto; gap: 18px; }
+    .side-block { display: flex; flex-direction: column; gap: 9px; padding-top: 18px; border-top: 1px solid var(--line); }
+    .side-block:first-child { padding-top: 0; border-top: none; }
+    .room-title { font-family: 'Space Grotesk', sans-serif; font-size: 18px; font-weight: 600; margin: 0; color: var(--ink); }
+    .room-id { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--mist); }
+    .field-label { font-size: 12px; color: var(--mist); margin: 0; }
     .main-content { flex: 1; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
-    .header { height: 50px; background: #111827; border-bottom: 1px solid #1f2937; display: flex; align-items: center; justify-content: space-between; padding: 0 20px; flex-shrink: 0; box-sizing: border-box; }
-    textarea { flex: 1; background: #030712; color: #38bdf8; border: none; font-size: 14px; padding: 15px; resize: none; outline: none; line-height: 1.5; overflow-y: auto; box-sizing: border-box; }
-    .terminal-pane { height: 38vh; background: #020617; border-top: 1px solid #1f2937; display: flex; flex-direction: column; flex-shrink: 0; }
-    .terminal-header { background: #0f172a; padding: 8px 15px; font-size: 13px; font-weight: bold; color: #38bdf8; display: flex; justify-content: space-between; align-items:center; }
-    #outputBox { margin: 0; padding: 12px; font-size: 13px; color: #4ade80; overflow-y: auto; flex: 1; white-space: pre-wrap; background: #020617; border: none; outline: none; font-family: 'Courier New', monospace; box-sizing: border-box; }
-    button { background: linear-gradient(135deg, #00ffcc, #38bdf8); color: #030712; border: none; padding: 7px 14px; font-weight: bold; border-radius: 4px; cursor: pointer; font-size:12px; }
-    button:hover { opacity: 0.85; }
-    button:disabled { opacity: 0.4; cursor: not-allowed; }
-    select, input { background: #1f2937; color: #fff; border: 1px solid #374151; padding: 6px; border-radius: 4px; font-family: inherit; }
-    .user-badge { background: #1f2937; padding: 5px 8px; margin-bottom: 5px; border-radius: 4px; font-size: 12px; border-left: 3px solid #00ffcc; }
-    .ai-panel { background: #1e1b4b; border: 1px solid #4338ca; padding: 10px; border-radius: 6px; margin-top: 10px; font-size: 12px; color: #c7d2fe; display: flex; flex-direction: column; height: 170px; box-sizing: border-box; }
-    .ai-chat-box { flex: 1; overflow-y: auto; background: #0f172a; padding: 6px; margin-bottom: 6px; border-radius: 4px; font-size: 11px; white-space: pre-wrap; }
-    .log-panel { background: #0f172a; border: 1px solid #1e293b; padding: 8px; border-radius: 6px; margin-top: 10px; height: 100px; overflow-y: auto; font-size: 11px; color: #94a3b8; box-sizing: border-box; }
-    #cdnError { display:none; position:fixed; top:0; left:0; right:0; background:#7f1d1d; color:#fff; padding:10px 16px; font-size:13px; z-index:9999; text-align:center; }
-    #cdnError button { margin-left:12px; background:#fff; color:#7f1d1d; }
+    .header { height: 56px; background: var(--panel); border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; padding: 0 24px; flex-shrink: 0; }
+    .brand { font-family: 'Space Grotesk', sans-serif; font-weight: 600; font-size: 16px; color: var(--ink); }
+    textarea { flex: 1; background: var(--void); color: #cfe0ec; border: none; font-size: 14px; padding: 20px; resize: none; outline: none; line-height: 1.6; font-family: 'JetBrains Mono', monospace; }
+    .terminal-pane { height: 36vh; background: #0d1018; border-top: 1px solid var(--line); display: flex; flex-direction: column; flex-shrink: 0; }
+    .terminal-header { background: var(--panel); padding: 10px 20px; font-size: 13px; color: var(--mist); display: flex; justify-content: space-between; align-items: center; }
+    #outputBox { margin: 0; padding: 16px 20px; font-size: 13px; color: #a7e8bf; overflow-y: auto; flex: 1; white-space: pre-wrap; background: #0d1018; border: none; outline: none; font-family: 'JetBrains Mono', monospace; }
+    button { background: var(--signal); color: #241305; border: none; padding: 9px 16px; font-weight: 600; border-radius: 6px; cursor: pointer; font-size: 13px; font-family: 'IBM Plex Sans', sans-serif; transition: background-color .15s ease; }
+    button:hover { background: var(--signal-strong); }
+    button:disabled { background: var(--raised); color: var(--mist); cursor: not-allowed; }
+    select, input { background: var(--raised); color: var(--ink); border: 1px solid var(--line); padding: 8px 10px; border-radius: 6px; font-family: 'IBM Plex Sans', sans-serif; font-size: 13px; }
+    select:focus, input:focus, textarea:focus { outline: 2px solid var(--signal); outline-offset: -1px; }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+    .user-badge { background: var(--raised); padding: 9px 11px; border-radius: 6px; font-size: 13px; border-left: 3px solid var(--beacon); }
+    .ai-panel { background: var(--raised); border: 1px solid var(--line); padding: 12px; border-radius: 8px; font-size: 12px; color: #c7cedb; display: flex; flex-direction: column; height: 170px; }
+    .ai-panel b { font-family: 'Space Grotesk', sans-serif; font-weight: 600; color: var(--ink); font-size: 13px; }
+    .ai-chat-box { flex: 1; overflow-y: auto; background: var(--void); padding: 8px; margin-bottom: 8px; border-radius: 6px; font-size: 12px; white-space: pre-wrap; font-family: 'JetBrains Mono', monospace; }
+    .log-panel { background: var(--void); border: 1px solid var(--line); padding: 10px; border-radius: 6px; height: 100px; overflow-y: auto; font-size: 12px; color: var(--mist); }
+    #cdnError { display: none; position: fixed; top: 0; left: 0; right: 0; background: var(--alert); color: #2a0b0b; padding: 12px 16px; font-size: 13px; z-index: 9999; text-align: center; }
+    #cdnError button { margin-left: 12px; background: #fff; color: var(--alert); }
+    #syntaxBar { padding: 9px 24px; font-size: 13px; background: var(--panel); color: var(--mist); flex-shrink: 0; border-bottom: 1px solid var(--line); font-family: 'JetBrains Mono', monospace; }
 </style></head>
 <body>
     <div id="cdnError">
-        ⚠️ Could not load the real-time engine (Socket.IO) from any CDN. Check your internet connection or ad/script blocker and reload.
+        Could not load the real-time engine (Socket.IO) from any CDN. Check your internet connection or ad/script blocker and reload.
         <button onclick="location.reload()">Reload</button>
     </div>
-    <div id="waitingOverlay" style="display:none; position:fixed; inset:0; background:rgba(3,7,18,0.95); z-index:9998; color:#00ffcc; flex-direction:column; align-items:center; justify-content:center; font-family:'Courier New',monospace; text-align:center; padding:20px;">
-        <div id="waitingTitle" style="font-size:18px; margin-bottom:10px;">⏳ Waiting for the host to let you in...</div>
-        <div id="waitingSub" style="font-size:13px; color:#94a3b8;">Ask them to approve your join request.</div>
+    <div id="waitingOverlay" style="display:none; position:fixed; inset:0; background:rgba(18,21,31,0.97); z-index:9998; color:#eef1f6; flex-direction:column; align-items:center; justify-content:center; font-family:'IBM Plex Sans',sans-serif; text-align:center; padding:20px;">
+        <div id="waitingTitle" style="font-family:'Space Grotesk',sans-serif; font-size:19px; font-weight:600; margin-bottom:10px;">Waiting for the host to let you in</div>
+        <div id="waitingSub" style="font-size:13px; color:#8c93a6;">Ask them to approve your join request.</div>
     </div>
-    <div id="joinRequestBanner" style="display:none; position:fixed; top:0; left:0; right:0; background:#1e1b4b; border-bottom:1px solid #4338ca; color:#c7d2fe; padding:10px 16px; font-size:13px; z-index:9999; text-align:center;">
+    <div id="joinRequestBanner" style="display:none; position:fixed; top:0; left:0; right:0; background:#202534; border-bottom:1px solid #2b3146; color:#eef1f6; padding:12px 16px; font-size:13px; z-index:9999; text-align:center;">
         <span id="joinRequestText"></span>
-        <button id="joinApproveBtn" style="background:#10b981; color:#fff; margin-left:10px;">✅ Allow</button>
-        <button id="joinDenyBtn" style="background:#ef4444; color:#fff; margin-left:6px;">❌ Deny</button>
+        <button id="joinApproveBtn" style="background:#7bd88f; color:#102012; margin-left:10px;">Allow</button>
+        <button id="joinDenyBtn" style="background:#ef6b6b; color:#2a0b0b; margin-left:6px;">Deny</button>
     </div>
-    <div id="timeMachineModal" style="display:none; position:fixed; inset:0; background:rgba(3,7,18,0.92); z-index:9997; align-items:center; justify-content:center; font-family:'Courier New',monospace;">
-        <div style="background:#0f172a; border:1px solid #a855f7; border-radius:10px; width:min(900px,92vw); max-height:88vh; display:flex; flex-direction:column; padding:18px; box-sizing:border-box;">
+    <div id="timeMachineModal" style="display:none; position:fixed; inset:0; background:rgba(12,15,22,0.92); z-index:9997; align-items:center; justify-content:center; font-family:'IBM Plex Sans',sans-serif;">
+        <div style="background:#191d29; border:1px solid #2b3146; border-radius:10px; width:min(900px,92vw); max-height:88vh; display:flex; flex-direction:column; padding:20px; box-sizing:border-box;">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-                <h3 style="margin:0; color:#c084fc;">🕰️ Session Time Machine</h3>
-                <button onclick="closeTimeMachine()" style="background:#ef4444; color:#fff;">✕ Close</button>
+                <h3 style="margin:0; font-family:'Space Grotesk',sans-serif; font-weight:600; color:#eef1f6;">Session Time Machine</h3>
+                <button onclick="closeTimeMachine()" style="background:#ef6b6b; color:#2a0b0b;">Close</button>
             </div>
-            <div style="font-size:12px; color:#94a3b8; margin-bottom:10px;">Scrub through how this room's code evolved, who changed it, and what each run produced &mdash; something most online compilers never let you see.</div>
-            <div id="tmEmptyMsg" style="color:#64748b; font-size:13px; padding:20px 0;">No snapshots recorded yet &mdash; keep coding or run your program, and this will start filling in live.</div>
+            <div style="font-size:12px; color:#8c93a6; margin-bottom:10px;">Scrub through how this room's code evolved, who changed it, and what each run produced &mdash; something most online compilers never let you see.</div>
+            <div id="tmEmptyMsg" style="color:#5b6274; font-size:13px; padding:20px 0;">No snapshots recorded yet &mdash; keep coding or run your program, and this will start filling in live.</div>
             <div id="tmBody" style="display:none; flex:1; overflow:hidden; flex-direction:column;">
                 <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px;">
-                    <button id="tmPlayBtn" onclick="toggleTimeMachinePlay()" style="background:#a855f7; color:#fff;">▶ Play</button>
+                    <button id="tmPlayBtn" onclick="toggleTimeMachinePlay()" style="background:#4fd1c0; color:#07231f;">Play</button>
                     <input type="range" id="tmSlider" min="0" max="0" value="0" style="flex:1;" oninput="showSnapshot(parseInt(this.value))">
-                    <span id="tmIndexLabel" style="font-size:11px; color:#94a3b8; min-width:70px; text-align:right;">0 / 0</span>
+                    <span id="tmIndexLabel" style="font-size:11px; color:#8c93a6; min-width:70px; text-align:right; font-family:'JetBrains Mono',monospace;">0 / 0</span>
                 </div>
-                <div id="tmMeta" style="font-size:12px; margin-bottom:6px; color:#e2e8f0;"></div>
-                <div style="flex:1; overflow-y:auto; background:#020617; border:1px solid #1e293b; border-radius:6px; padding:10px; margin-bottom:8px;">
-                    <pre id="tmCode" style="margin:0; color:#38bdf8; font-size:12px; white-space:pre-wrap;"></pre>
+                <div id="tmMeta" style="font-size:12px; margin-bottom:6px; color:#c7cedb;"></div>
+                <div style="flex:1; overflow-y:auto; background:#12151f; border:1px solid #2b3146; border-radius:6px; padding:10px; margin-bottom:8px;">
+                    <pre id="tmCode" style="margin:0; color:#cfe0ec; font-size:12px; white-space:pre-wrap; font-family:'JetBrains Mono',monospace;"></pre>
                 </div>
-                <div id="tmOutputWrap" style="display:none; max-height:120px; overflow-y:auto; background:#011; border:1px solid #1e293b; border-radius:6px; padding:10px; margin-bottom:8px;">
-                    <div style="color:#94a3b8; font-size:11px; margin-bottom:4px;">📊 Output at this point:</div>
-                    <pre id="tmOutput" style="margin:0; color:#4ade80; font-size:12px; white-space:pre-wrap;"></pre>
+                <div id="tmOutputWrap" style="display:none; max-height:120px; overflow-y:auto; background:#0d1018; border:1px solid #2b3146; border-radius:6px; padding:10px; margin-bottom:8px;">
+                    <div style="color:#8c93a6; font-size:11px; margin-bottom:4px;">Output at this point:</div>
+                    <pre id="tmOutput" style="margin:0; color:#a7e8bf; font-size:12px; white-space:pre-wrap; font-family:'JetBrains Mono',monospace;"></pre>
                 </div>
-                <button id="tmRestoreBtn" onclick="restoreSnapshot()" style="background:#f59e0b; color:#030712;">⏪ Restore this version into the live editor</button>
+                <button id="tmRestoreBtn" onclick="restoreSnapshot()" style="background:#ff9d5c; color:#241305;">Restore this version into the live editor</button>
             </div>
         </div>
     </div>
     <div class="sidebar">
-        <h3 style="color: #00ffcc; margin-top:0;">🌐 Room: {{ room_id }}</h3>
-        <p style="font-size: 12px; color: #94a3b8; margin: 5px 0;">Developer Handle:</p>
-        <div id="userBadge" class="user-badge">🟡 Connecting...</div>
-
-        <div style="display: flex; gap: 5px; margin-top: 10px;">
-            <button id="btnSave" onclick="saveCloud()" style="flex:1; background:#10b981; color:#fff;" disabled>💾 Save Cloud</button>
-            <button id="btnDownload" onclick="downloadCode()" style="flex:1; background:#3b82f6; color:#fff;" disabled>📥 Download</button>
+        <div class="side-block">
+            <h3 class="room-title">Room {{ room_id }}</h3>
+            <p class="field-label">You are known in this room as</p>
+            <div id="userBadge" class="user-badge">Connecting...</div>
         </div>
-        <button id="btnTimeMachine" onclick="openTimeMachine()" style="width:100%; margin-top:5px; background:#a855f7; color:#fff;" disabled>🕰️ Time Machine (<span id="historyCount">0</span>)</button>
 
-        <p style="font-size: 12px; color: #94a3b8; margin: 10px 0 5px 0;">👥 Online Now (<span id="onlineCount">0</span>):</p>
-        <div id="onlineUsers" class="log-panel" style="height: 70px;">Connecting...</div>
-
-        <div class="ai-panel">
-            <b>🤖 AI Copilot Assistant</b>
-            <div id="aiChatBox" class="ai-chat-box">Ask AI: 'explain', 'optimize', or 'find bugs'...</div>
-            <div style="display: flex; gap: 5px;">
-                <input type="text" id="aiQueryInput" placeholder="Ask AI..." style="flex:1; font-size:11px; padding:4px;">
-                <button id="btnAiSend" onclick="sendAiQuery()" style="padding: 4px 8px; font-size:11px;" disabled>Send</button>
+        <div class="side-block">
+            <div style="display: flex; gap: 8px;">
+                <button id="btnSave" onclick="saveCloud()" style="flex:1;" disabled>Save cloud</button>
+                <button id="btnDownload" onclick="downloadCode()" style="flex:1;" disabled>Download</button>
             </div>
-            <button id="btnAiFix" onclick="triggerAiFix()" style="width:100%; background:#4f46e5; color:#fff; padding:5px; font-size:11px; margin-top:5px;" disabled>⚡ Quick AI Auto-Fix</button>
+            <button id="btnTimeMachine" onclick="openTimeMachine()" style="width:100%;" disabled>Time Machine (<span id="historyCount">0</span>)</button>
         </div>
 
-        <p style="font-size: 12px; color: #94a3b8; margin: 10px 0 5px 0;">📜 Live Activity Log:</p>
-        <div id="activityLog" class="log-panel">Initializing logs...</div>
+        <div class="side-block">
+            <p class="field-label">Online now (<span id="onlineCount">0</span>)</p>
+            <div id="onlineUsers" class="log-panel" style="height: 70px;">Connecting...</div>
+        </div>
+
+        <div class="side-block">
+            <div class="ai-panel">
+                <b>AI Copilot</b>
+                <div id="aiChatBox" class="ai-chat-box">Ask: 'explain', 'optimize', or 'find bugs'...</div>
+                <div style="display: flex; gap: 5px;">
+                    <input type="text" id="aiQueryInput" placeholder="Ask AI..." style="flex:1; font-size:12px; padding:6px 8px;">
+                    <button id="btnAiSend" onclick="sendAiQuery()" style="padding: 6px 10px; font-size:12px;" disabled>Send</button>
+                </div>
+                <button id="btnAiFix" onclick="triggerAiFix()" style="width:100%; padding:7px; font-size:12px; margin-top:6px;" disabled>Quick auto-fix</button>
+            </div>
+        </div>
+
+        <div class="side-block">
+            <p class="field-label">Activity log</p>
+            <div id="activityLog" class="log-panel">Initializing logs...</div>
+        </div>
     </div>
     <div class="main-content">
         <div class="header">
-            <div style="display: flex; gap: 15px; align-items: center;">
-                <span style="font-weight: bold; color: #00ffcc;">🚀 NEXUS IDE</span>
+            <div style="display: flex; gap: 16px; align-items: center;">
+                <span class="brand">Nexus IDE</span>
                 <select id="langSelect">
                     <option value="python" selected>Python 3</option>
                     <option value="javascript">JavaScript (Node)</option>
                     <option value="cpp">C++</option>
                 </select>
             </div>
-            <button id="btnRun" onclick="runCode()" disabled>▶ Run Code</button>
+            <button id="btnRun" onclick="runCode()" disabled>Run code</button>
         </div>
-        <div id="syntaxBar" style="padding:6px 20px; font-size:12px; background:#1f2937; color:#94a3b8; flex-shrink:0; box-sizing:border-box; border-bottom:1px solid #111827;">⚪ Live syntax check will appear here as you type...</div>
+        <div id="syntaxBar">Live syntax check will appear here as you type...</div>
         <textarea id="codeEditor" spellcheck="false"></textarea>
         <div class="terminal-pane">
             <div class="terminal-header">
-                <span>📊 Output Console (Type input and press Enter)</span>
-                <span id="ptyStatus" style="color: #f87171;">● Disconnected</span>
+                <span>Output console &middot; type input and press Enter</span>
+                <span id="ptyStatus" style="color: #ef6b6b;">Disconnected</span>
             </div>
             <textarea id="outputBox" spellcheck="false" placeholder="Connecting to server..." onkeydown="handleConsoleKey(event)"></textarea>
         </div>
@@ -831,9 +881,9 @@ ROOM_PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><titl
         (function pingHealth() {
             const lBox = document.getElementById('activityLog');
             fetch('/health').then(r => r.json()).then(d => {
-                lBox.innerHTML = `<div style="color:#4ade80;">✅ Backend alive: Flask-SocketIO ${d.flask_socketio_version}, mode=${d.async_mode}</div>` + lBox.innerHTML;
+                lBox.innerHTML = `<div style="color:#7bd88f;">✅ Backend alive: Flask-SocketIO ${d.flask_socketio_version}, mode=${d.async_mode}</div>` + lBox.innerHTML;
             }).catch(e => {
-                lBox.innerHTML = `<div style="color:#f87171;">❌ /health request itself failed: ${e}. The backend process is not reachable at all (deploy crashed, or still cold-starting).</div>` + lBox.innerHTML;
+                lBox.innerHTML = `<div style="color:#ef6b6b;">❌ /health request itself failed: ${e}. The backend process is not reachable at all (deploy crashed, or still cold-starting).</div>` + lBox.innerHTML;
             });
         })();
 
@@ -859,7 +909,7 @@ ROOM_PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><titl
                     '⚠️ Socket.IO could not connect: <b>' + msg + '</b> ' +
                     '<button onclick="location.reload()">Reload</button>';
                 let lBox = document.getElementById('activityLog');
-                lBox.innerHTML = `<div style="color:#f87171;">❌ Socket error: ${msg}</div>` + lBox.innerHTML;
+                lBox.innerHTML = `<div style="color:#ef6b6b;">❌ Socket error: ${msg}</div>` + lBox.innerHTML;
             }
 
             // Safety net: if we're still stuck "connecting" after 12s, show
@@ -904,8 +954,9 @@ ROOM_PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><titl
             document.getElementById('userBadge').innerText = "🟡 " + username + " (connecting...)";
 
             socket.on('connect', () => {
+                document.body.classList.add('ready');
                 document.getElementById('userBadge').innerText = "🟢 " + username;
-                document.getElementById('ptyStatus').style.color = '#4ade80';
+                document.getElementById('ptyStatus').style.color = '#7bd88f';
                 document.getElementById('ptyStatus').innerText = '● Interactive PTY Active';
                 outputBox.placeholder = "Console ready... Click 'Run Code' to start execution.";
                 ['btnSave', 'btnDownload', 'btnAiSend', 'btnAiFix', 'btnRun', 'btnTimeMachine'].forEach(id => {
@@ -916,7 +967,7 @@ ROOM_PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><titl
 
             socket.on('disconnect', () => {
                 document.getElementById('userBadge').innerText = "🔴 " + username + " (disconnected)";
-                document.getElementById('ptyStatus').style.color = '#f87171';
+                document.getElementById('ptyStatus').style.color = '#ef6b6b';
                 document.getElementById('ptyStatus').innerText = '● Disconnected';
             });
 
@@ -949,7 +1000,7 @@ ROOM_PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><titl
                 const box = document.getElementById('onlineUsers');
                 box.innerHTML = users.length
                     ? users.map(u => `<div>🟢 ${escapeHtml(u)}</div>`).join('')
-                    : '<div style="color:#64748b;">No one else yet</div>';
+                    : '<div style="color:#8c93a6;">No one else yet</div>';
             });
 
             // --- Host-approval flow -------------------------------------
@@ -1029,16 +1080,16 @@ ROOM_PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><titl
             function updateSyntaxBar(data) {
                 if (!data) return;
                 if (data.status === 'ok') {
-                    syntaxBar.style.background = '#064e3b';
-                    syntaxBar.style.color = '#4ade80';
+                    syntaxBar.style.background = '#163024';
+                    syntaxBar.style.color = '#7bd88f';
                     syntaxBar.innerText = '🟢 ' + (data.message || 'No syntax errors detected.');
                 } else if (data.status === 'error') {
-                    syntaxBar.style.background = '#7f1d1d';
-                    syntaxBar.style.color = '#fecaca';
+                    syntaxBar.style.background = '#331818';
+                    syntaxBar.style.color = '#ef6b6b';
                     syntaxBar.innerText = '🔴 ' + (data.line ? ('Line ' + data.line + ': ') : '') + data.message;
                 } else {
-                    syntaxBar.style.background = '#334155';
-                    syntaxBar.style.color = '#cbd5e1';
+                    syntaxBar.style.background = '#202534';
+                    syntaxBar.style.color = '#c7cedb';
                     syntaxBar.innerText = '⚪ ' + (data.message || 'Syntax check unavailable right now.');
                 }
             }
@@ -1050,8 +1101,8 @@ ROOM_PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><titl
             // against the right toolchain (no duplicate Time Machine entry
             // gets recorded for this, since the code itself is unchanged).
             document.getElementById('langSelect').addEventListener('change', () => {
-                syntaxBar.style.background = '#1f2937';
-                syntaxBar.style.color = '#94a3b8';
+                syntaxBar.style.background = '#191d29';
+                syntaxBar.style.color = '#8c93a6';
                 syntaxBar.innerText = '⏳ Re-checking syntax for the new language...';
                 socket.emit('update_code', {
                     room_id: roomId, code: editor.value, username: username,
